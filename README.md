@@ -155,4 +155,4 @@ GNU <code>windres</code> fails if the Cargo target directory path contains an am
 
 ## License
 
-licensed under [MIT](LICENSE-MIT).
+licensed under [MIT](LICENSE).
