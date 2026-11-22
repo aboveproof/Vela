@@ -221,7 +221,7 @@ pub fn save_settings(settings: AppSettings, state: State<'_, AppState>) -> Resul
 }
 
 #[tauri::command]
-pub fn connect_profile(
+pub async fn connect_profile(
     profile_id: String,
     cols: u32,
     rows: u32,
