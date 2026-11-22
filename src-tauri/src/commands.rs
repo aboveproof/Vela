@@ -158,7 +158,10 @@ impl fmt::Debug for NewProfileInput {
             .field("use_key", &self.use_key)
             .field("password", &self.password.as_ref().map(|_| "[REDACTED]"))
             .field("key_path", &self.key_path)
-            .field("passphrase", &self.passphrase.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "passphrase",
+                &self.passphrase.as_ref().map(|_| "[REDACTED]"),
+            )
             .finish()
     }
 }
@@ -317,9 +320,7 @@ pub async fn connect_profile(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<ConnectResult, String> {
-    if session_id.trim().is_empty() {
-        return Err("session_id is required".to_string());
-    }
+    Uuid::parse_str(&session_id).map_err(|_| "invalid session ID".to_string())?;
     let uuid = Uuid::parse_str(&profile_id).map_err(|e| e.to_string())?;
     let store = state
         .profile_store
@@ -372,17 +373,23 @@ pub async fn connect_profile(
     };
 
     info!("Connecting Tauri session to {}", profile.display_address());
-    let (handle, mut event_rx) = connect_session(cfg, known_hosts);
-    if !settings.remote_monitoring {
-        let _ = handle.cmd_tx.send(SessionCommand::SetMonitoring(false)).await;
-    }
-
-    {
+    let (mut event_rx, monitoring_tx) = {
         let mut guard = state
             .sessions
             .lock()
             .map_err(|e| format!("session lock poisoned: {e}"))?;
+        if guard.contains_key(&session_id) {
+            return Err("session ID already in use".to_string());
+        }
+        let (handle, event_rx) = connect_session(cfg, known_hosts);
+        let monitoring_tx = handle.cmd_tx.clone();
         guard.insert(session_id.clone(), handle);
+        (event_rx, monitoring_tx)
+    };
+    if !settings.remote_monitoring {
+        let _ = monitoring_tx
+            .send(SessionCommand::SetMonitoring(false))
+            .await;
     }
 
     let sid = session_id.clone();
@@ -759,7 +766,10 @@ pub async fn sftp_rename(
     let parent = parent_remote_path(&old_path);
     let new_path = join_remote_path(&parent, valid);
     state
-        .send_cmd(&session_id, SessionCommand::SftpRename { old_path, new_path })
+        .send_cmd(
+            &session_id,
+            SessionCommand::SftpRename { old_path, new_path },
+        )
         .await
 }
 
@@ -781,14 +791,11 @@ pub async fn sftp_chmod(
     mode: u32,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
+    if mode > 0o7777 {
+        return Err("Permissions must be a four-digit octal mode or less".to_string());
+    }
     state
-        .send_cmd(
-            &session_id,
-            SessionCommand::SftpChmod {
-                path,
-                mode: mode & 0o7777,
-            },
-        )
+        .send_cmd(&session_id, SessionCommand::SftpChmod { path, mode })
         .await
 }
 
@@ -1029,7 +1036,10 @@ pub async fn stop_local_tunnel(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     state
-        .send_cmd(&session_id, SessionCommand::StopLocalTunnel { id: tunnel_id })
+        .send_cmd(
+            &session_id,
+            SessionCommand::StopLocalTunnel { id: tunnel_id },
+        )
         .await
 }
 

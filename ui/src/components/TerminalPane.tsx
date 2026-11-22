@@ -84,7 +84,73 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
 
     const [findOpen, setFindOpen] = useState(false);
     const [findQuery, setFindQuery] = useState("");
+    const [findCase, setFindCase] = useState(false);
+    const [findWord, setFindWord] = useState(false);
+    const [findRegex, setFindRegex] = useState(false);
+    const [findResult, setFindResult] = useState({ index: 0, count: 0 });
+    const [findError, setFindError] = useState(false);
     const findInputRef = useRef<HTMLInputElement | null>(null);
+
+    const openFindBar = () => {
+      const selected = termRef.current?.getSelection();
+      if (selected && !selected.includes("\n") && selected.length <= 256) setFindQuery(selected);
+      setFindOpen(true);
+      window.setTimeout(() => findInputRef.current?.select(), 10);
+    };
+
+    const closeFindBar = () => {
+      setFindOpen(false);
+      searchRef.current?.clearDecorations();
+      termRef.current?.clearSelection();
+      termRef.current?.focus();
+    };
+
+    const find = (direction: "next" | "previous") => {
+      if (!findQuery || findError) return;
+      const options = {
+        caseSensitive: findCase,
+        wholeWord: findWord,
+        regex: findRegex,
+        decorations: {
+          matchOverviewRuler: theme.accent,
+          activeMatchColorOverviewRuler: theme.textPrimary,
+          matchBackground: theme.selection,
+        },
+      };
+      if (direction === "next") searchRef.current?.findNext(findQuery, options);
+      else searchRef.current?.findPrevious(findQuery, options);
+    };
+
+    useEffect(() => {
+      if (!findOpen || !findQuery) {
+        searchRef.current?.clearDecorations();
+        setFindError(false);
+        setFindResult({ index: 0, count: 0 });
+        return;
+      }
+      if (findRegex) {
+        try {
+          new RegExp(findQuery);
+        } catch {
+          searchRef.current?.clearDecorations();
+          setFindError(true);
+          setFindResult({ index: 0, count: 0 });
+          return;
+        }
+      }
+      setFindError(false);
+      searchRef.current?.findNext(findQuery, {
+        caseSensitive: findCase,
+        wholeWord: findWord,
+        regex: findRegex,
+        incremental: true,
+        decorations: {
+          matchOverviewRuler: theme.accent,
+          activeMatchColorOverviewRuler: theme.textPrimary,
+          matchBackground: theme.selection,
+        },
+      });
+    }, [findOpen, findQuery, findCase, findWord, findRegex, theme]);
 
     const dumpBuffer = (): string => {
       const term = termRef.current;
@@ -130,10 +196,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
           termRef.current?.paste(text);
           termRef.current?.focus();
         },
-        openFind: () => {
-          setFindOpen(true);
-          setTimeout(() => findInputRef.current?.focus(), 10);
-        },
+        openFind: openFindBar,
         clearScrollback: () => {
           termRef.current?.clear();
         },
@@ -196,6 +259,9 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
       termRef.current = term;
       fitRef.current = fitAddon;
       searchRef.current = searchAddon;
+      const resultsDisp = searchAddon.onDidChangeResults(({ resultIndex, resultCount }) => {
+        setFindResult({ index: resultIndex, count: resultCount });
+      });
 
       // Drain any early PTY chunks buffered before TerminalPane mounted, then register live writer.
       const buffered = drainBufferedPty(sessionId);
@@ -274,8 +340,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
           return false;
         }
         if (ev.ctrlKey && ev.shiftKey && ev.key.toLowerCase() === "f") {
-          setFindOpen(true);
-          setTimeout(() => findInputRef.current?.focus(), 10);
+          openFindBar();
           return false;
         }
         if (ev.ctrlKey && ev.shiftKey && ev.key.toLowerCase() === "s") {
@@ -302,6 +367,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
         dataDisp.dispose();
         oscDisp.dispose();
         selDisp.dispose();
+        resultsDisp.dispose();
         term.dispose();
         termRef.current = null;
         fitRef.current = null;
@@ -366,46 +432,60 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
             <input
               ref={findInputRef}
               value={findQuery}
-              onChange={(e) => {
-                setFindQuery(e.target.value);
-                if (e.target.value) searchRef.current?.findNext(e.target.value);
-              }}
+              onChange={(e) => setFindQuery(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter") {
-                  if (e.shiftKey) searchRef.current?.findPrevious(findQuery);
-                  else searchRef.current?.findNext(findQuery);
+                  find(e.shiftKey ? "previous" : "next");
                 } else if (e.key === "Escape") {
-                  setFindOpen(false);
-                  termRef.current?.focus();
+                  closeFindBar();
                 }
               }}
-              placeholder="Find in terminal..."
+              placeholder="Find in terminal"
+              aria-label="Find in terminal"
               className="w-44 rounded border px-2 py-0.5 text-xs outline-none"
               style={{
                 backgroundColor: theme.bgBase,
-                borderColor: theme.border,
+                borderColor: findError ? theme.danger : theme.border,
                 color: theme.textPrimary,
               }}
             />
+            <span className="min-w-12 text-center text-[11px] tabular-nums" style={{ color: findError ? theme.danger : theme.textMuted }} aria-live="polite">
+              {findError ? "Invalid" : !findQuery ? "" : findResult.count < 0 ? "1000+" : `${findResult.count ? findResult.index + 1 : 0}/${findResult.count}`}
+            </span>
+            {([
+              ["Aa", "Match case", findCase, setFindCase],
+              ["W", "Whole word", findWord, setFindWord],
+              [".*", "Regular expression", findRegex, setFindRegex],
+            ] as const).map(([label, title, enabled, setEnabled]) => (
+              <button
+                key={title}
+                type="button"
+                title={title}
+                aria-label={title}
+                aria-pressed={enabled}
+                onClick={() => setEnabled(!enabled)}
+                className="rounded px-1.5 py-1 font-mono text-[11px] hover:bg-white/10"
+                style={{ backgroundColor: enabled ? theme.selection : "transparent", color: enabled ? theme.textPrimary : theme.textMuted }}
+              >{label}</button>
+            ))}
             <button
-              onClick={() => searchRef.current?.findPrevious(findQuery)}
+              onClick={() => find("previous")}
+              disabled={!findQuery || findError}
               className="rounded p-1 hover:bg-white/10"
               title="Previous"
             >
               <ChevronUp className="h-3.5 w-3.5" />
             </button>
             <button
-              onClick={() => searchRef.current?.findNext(findQuery)}
+              onClick={() => find("next")}
+              disabled={!findQuery || findError}
               className="rounded p-1 hover:bg-white/10"
               title="Next"
             >
               <ChevronDown className="h-3.5 w-3.5" />
             </button>
             <button
-              onClick={() => {
-                setFindOpen(false);
-                termRef.current?.focus();
-              }}
+              onClick={closeFindBar}
               className="rounded p-1 hover:bg-white/10"
               title="Close"
             >

@@ -11,13 +11,8 @@ use crate::error::{VelaError, VelaResult};
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum HostKeyStatus {
     Trusted,
-    Unknown {
-        fingerprint: String,
-    },
-    Mismatch {
-        expected: String,
-        actual: String,
-    },
+    Unknown { fingerprint: String },
+    Mismatch { expected: String, actual: String },
 }
 
 /// Computes an OpenSSH-style `SHA256:...` fingerprint from raw public key bytes.
@@ -55,7 +50,9 @@ impl KnownHostsStore {
                 .chars()
                 .any(|c| c.is_whitespace() || c.is_control() || c == '#')
         {
-            return Err(VelaError::Config(format!("invalid SSH host name: '{host}'")));
+            return Err(VelaError::Config(format!(
+                "invalid SSH host name: '{host}'"
+            )));
         }
         let lower = trimmed.to_lowercase();
         if port == 22 {
@@ -128,7 +125,10 @@ impl KnownHostsStore {
     }
 
     pub fn trust(&self, host: &str, port: u16, fingerprint: &str) -> VelaResult<()> {
-        if fingerprint.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        if fingerprint
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control())
+        {
             return Err(VelaError::Config("invalid host fingerprint".into()));
         }
         let mut entries = self.read_entries()?;

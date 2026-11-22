@@ -75,7 +75,9 @@ impl VelaError {
                 actual,
             } => UserError {
                 title: format!("Host key changed for {host}:{port}"),
-                detail: format!("Expected {expected}, received {actual}. Verify server identity before updating."),
+                detail: format!(
+                    "Expected {expected}, received {actual}. Verify server identity before updating."
+                ),
                 action: RecoveryAction::UpdateKnownHosts,
             },
             Self::HostKeyRejected { host, port } => UserError {

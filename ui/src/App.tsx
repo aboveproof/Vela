@@ -97,6 +97,7 @@ export function App() {
 
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>("hosts");
+  const [focusHostField, setFocusHostField] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(296);
   const [quickConnect, setQuickConnect] = useState("");
   const [form, setForm] = useState<QuickFormValues>(EMPTY_FORM);
@@ -129,6 +130,7 @@ export function App() {
     ? profiles.find((p) => p.id === activeSession.profileId) ?? null
     : null;
   const totalTunnels = sessions.reduce((acc, s) => acc + s.tunnels.length, 0);
+  const connectedSessions = sessions.filter((s) => s.state === "connected");
 
   const pushToast = useCallback(
     (title: string, kind: "info" | "error" = "info", detail?: string) => {
@@ -191,9 +193,15 @@ export function App() {
     setSelectedSftpPath(null);
   }, [activeSessionId, activeSession?.sftpPath]);
 
+  useEffect(() => {
+    if (!focusHostField || !sidebarOpen || sidebarTab !== "hosts") return;
+    document.querySelector<HTMLInputElement>('.vela-sidebar input[aria-label="Host address"]')?.focus();
+    setFocusHostField(false);
+  }, [focusHostField, sidebarOpen, sidebarTab]);
+
   // Turn off split/broadcast if session count drops below 2.
   useEffect(() => {
-    if (sessions.length < 2) {
+    if (sessions.filter((s) => s.state === "connected").length < 2) {
       setSplitSessionId(null);
       setBroadcastEnabled(false);
     } else if (splitSessionId && !sessions.some((s) => s.id === splitSessionId)) {
@@ -465,7 +473,7 @@ export function App() {
     (snippet: Snippet, broadcast: boolean) => {
       const payload = snippet.auto_execute ? `${snippet.command}\r` : snippet.command;
       const targets = broadcast
-        ? sessionsRef.current.map((s) => s.id)
+        ? sessionsRef.current.filter((s) => s.state === "connected").map((s) => s.id)
         : activeSessionIdRef.current
           ? [activeSessionIdRef.current]
           : [];
@@ -771,17 +779,17 @@ export function App() {
           : "border-r";
 
   const sidebarTitles: Record<SidebarTab, string> = {
-    hosts: "Sessions",
-    sftp: "SSH browser (SFTP)",
-    snippets: "Saved Snippets",
-    tunnels: "Port Forwarding",
-    keys: "SSH Key Manager",
+    hosts: "Connections",
+    sftp: "Remote files",
+    snippets: "Snippets",
+    tunnels: "Port forwarding",
+    keys: "SSH keys",
     settings: "Settings",
   };
 
   const sidebarEl = (
     <div
-      className={`flex shrink-0 flex-col gap-2 ${sidebarBorderClass} p-2.5`}
+      className={`vela-sidebar flex shrink-0 flex-col gap-3 ${sidebarBorderClass} p-4`}
       style={{
         width: horizontalDock ? "100%" : sidebarWidth,
         height: horizontalDock ? 230 : "100%",
@@ -799,8 +807,9 @@ export function App() {
           <input
             value={quickConnect}
             onChange={(e) => setQuickConnect(e.target.value)}
-            placeholder="Quick connect... (user@host)"
-            className="w-full rounded-lg border px-2.5 py-1.5 text-xs outline-none"
+            placeholder="Connect with user@host"
+            aria-label="Quick connect by address or saved host"
+            className="w-full rounded-xl border px-3 py-2.5 text-xs outline-none"
             style={{
               backgroundColor: theme.bgBase,
               borderColor: theme.border,
@@ -810,7 +819,7 @@ export function App() {
         </form>
       )}
 
-      <div className="px-0.5 text-[11px] font-medium" style={{ color: theme.textMuted }}>
+      <div className="px-0.5 pt-1 text-[11px] font-semibold uppercase tracking-[0.14em]" style={{ color: theme.textMuted }}>
         {sidebarTitles[sidebarTab]}
       </div>
 
@@ -895,7 +904,7 @@ export function App() {
           <SnippetsPanel
             snippets={snippets}
             hasActiveSession={Boolean(activeSession)}
-            sessionCount={sessions.length}
+            sessionCount={connectedSessions.length}
             theme={theme}
             onRunSnippet={handleRunSnippet}
             onCreateSnippet={(name, command, autoExecute) => {
@@ -993,30 +1002,25 @@ export function App() {
   );
 
   const terminalArea = (
-    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+    <div className="vela-workspace flex min-h-0 min-w-0 flex-1 flex-col p-2.5 pl-1.5">
       <div
-        className={`relative flex min-h-0 flex-1 ${splitSessionId ? "divide-x" : ""}`}
+        className={`vela-terminal-shell relative flex min-h-0 flex-1 overflow-hidden rounded-2xl border ${splitSessionId ? "divide-x" : ""}`}
         style={{ backgroundColor: theme.termBg, borderColor: theme.border }}
       >
         {sessions.length === 0 ? (
-          <div className="flex h-full w-full flex-col items-center justify-center gap-3 text-center">
-            <div
-              className="text-2xl font-semibold tracking-tight"
-              style={{ color: theme.textPrimary }}
-            >
-              Vela
+          <div className="vela-empty flex h-full w-full flex-col items-center justify-center px-6 text-center">
+            <div className="vela-empty-mark mb-7 flex h-16 w-16 items-center justify-center rounded-2xl border" style={{ borderColor: theme.border, backgroundColor: theme.bgElevated }}>
+              <Terminal className="h-7 w-7" strokeWidth={1.5} style={{ color: theme.accent }} />
             </div>
-            <div className="max-w-xs text-xs leading-relaxed" style={{ color: theme.textMuted }}>
-              Connect to a saved host on the left, import your{" "}
-              <code className="rounded px-1 py-0.5" style={{ backgroundColor: theme.bgElevated }}>
-                ~/.ssh/config
-              </code>
-              , or press{" "}
-              <kbd className="rounded px-1.5 py-0.5" style={{ backgroundColor: theme.bgElevated }}>
-                Ctrl+K
-              </kbd>{" "}
-              to jump anywhere.
+            <h1 className="text-[25px] font-semibold tracking-[-0.045em]" style={{ color: theme.textPrimary }}>Connect to a host</h1>
+            <p className="mt-2 max-w-sm text-[13px] leading-6" style={{ color: theme.textMuted }}>
+              Add a connection or import your SSH config. The terminal and remote files open together.
+            </p>
+            <div className="mt-7 flex flex-wrap items-center justify-center gap-2">
+              <button className="vela-empty-action rounded-xl px-4 py-2.5 text-xs font-semibold" style={{ color: theme.bgBase, backgroundColor: theme.textPrimary }} onClick={() => { setSidebarTab("hosts"); setSidebarOpen(true); setFocusHostField(true); }}>Add connection</button>
+              <button className="rounded-xl border px-4 py-2.5 text-xs font-medium" style={{ borderColor: theme.border, color: theme.textPrimary, backgroundColor: theme.bgElevated }} onClick={() => void handleImportSshConfig()}>Import SSH config</button>
             </div>
+            <p className="mt-8 text-[11px]" style={{ color: theme.textMuted }}>Press <kbd className="rounded-md border px-1.5 py-1" style={{ borderColor: theme.border, backgroundColor: theme.bgElevated }}>Ctrl K</kbd> to find a command</p>
           </div>
         ) : (
           sessions.map((s) => {
@@ -1059,7 +1063,7 @@ export function App() {
                   onSaveTranscript={saveActiveTranscript}
                   onSendData={(data) => {
                     if (broadcastRef.current) {
-                      for (const sess of sessionsRef.current) {
+                      for (const sess of sessionsRef.current.filter((item) => item.state === "connected")) {
                         void invoke("send_pty_input", { sessionId: sess.id, data });
                       }
                     } else {
@@ -1100,13 +1104,15 @@ export function App() {
           }
         }}
         title={title}
-        className="relative flex h-8 w-8 items-center justify-center rounded-lg transition-colors hover:bg-white/8"
+        aria-label={title}
+        aria-pressed={active}
+        className="vela-rail-button relative flex h-10 w-10 items-center justify-center rounded-xl transition-colors hover:bg-white/8"
         style={{
           backgroundColor: active ? theme.bgElevated : "transparent",
           color: active ? theme.textPrimary : theme.textMuted,
         }}
       >
-        <Icon className="h-4 w-4" />
+        <Icon className="h-[18px] w-[18px]" strokeWidth={1.7} />
         {badge !== undefined && badge > 0 && (
           <span
             className="absolute -right-0.5 -top-0.5 flex h-3.5 min-w-[14px] items-center justify-center rounded-full px-1 text-[9px] font-semibold tabular-nums"
@@ -1121,11 +1127,12 @@ export function App() {
 
   return (
     <div
-      className="flex h-screen w-screen flex-col overflow-hidden"
-      style={{ backgroundColor: theme.bgBase, color: theme.textPrimary }}
+      className="vela-app flex h-screen w-screen flex-col overflow-hidden"
+      style={{ backgroundColor: theme.bgBase, color: theme.textPrimary, "--vela-border": theme.border, "--vela-surface": theme.bgSurface, "--vela-elevated": theme.bgElevated, "--vela-accent": theme.accent, "--vela-muted": theme.textMuted } as React.CSSProperties}
     >
       <Titlebar
         sessions={sessions}
+        connectedCount={connectedSessions.length}
         activeSessionId={activeSessionId}
         splitSessionId={splitSessionId}
         broadcastEnabled={broadcastEnabled}
@@ -1144,13 +1151,13 @@ export function App() {
 
       <div className="flex min-h-0 flex-1">
         <div
-          className="flex w-11 shrink-0 flex-col items-center gap-1.5 border-r py-2"
+          className="vela-rail flex w-[60px] shrink-0 flex-col items-center gap-1.5 border-r py-4"
           style={{ backgroundColor: theme.bgBase, borderColor: theme.border }}
         >
           {railBtn("hosts", Server, "Sessions")}
           {railBtn("sftp", Folder, "SFTP Browser")}
           {railBtn("snippets", Code2, "Saved Snippets")}
-          {railBtn("tunnels", Cable, "Port Forwarding / Tunnels", totalTunnels)}
+          {railBtn("tunnels", Cable, "Port forwarding", totalTunnels)}
           {railBtn("keys", KeyRound, "SSH Key Manager")}
           <div className="flex-1" />
           {railBtn("settings", Settings, "Settings")}
@@ -1184,7 +1191,7 @@ export function App() {
       </div>
 
       <div
-        className="flex h-6 shrink-0 items-center justify-between border-t px-3 text-[11px]"
+        className="vela-status flex h-8 shrink-0 items-center justify-between border-t px-4 text-[11px]"
         style={{
           backgroundColor: theme.bgBase,
           borderColor: theme.border,
@@ -1193,12 +1200,12 @@ export function App() {
       >
         <span className="truncate">
           {activeSession
-            ? `${activeSession.state === "connected" ? "Connected" : activeSession.state === "connecting" ? "Connecting..." : "Disconnected"}  ·  ${activeSession.address}  ·  ${activeSession.sftpPath}`
-            : "Ready  ·  Ctrl+K: Command Palette  ·  Ctrl+B: Sidebar"}
+            ? `${activeSession.state === "connected" ? "Connected" : activeSession.state === "connecting" ? "Connecting…" : "Disconnected"}  ·  ${activeSession.address}  ·  ${activeSession.sftpPath}`
+            : "Ready  ·  Ctrl+K: commands  ·  Ctrl+B: sidebar"}
         </span>
         {broadcastEnabled && (
           <span className="shrink-0 font-medium" style={{ color: theme.warning }}>
-            Broadcasting to {sessions.length} terminals
+            Broadcasting to {connectedSessions.length} terminals
           </span>
         )}
       </div>

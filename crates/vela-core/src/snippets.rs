@@ -40,7 +40,8 @@ pub fn starter_snippets() -> Vec<Snippet> {
         Snippet {
             id: Uuid::from_u128(0x7665_6c61_0001_4000_8000_0000_0000_0001),
             name: "Docker Containers".to_string(),
-            command: r#"docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}""#.to_string(),
+            command: r#"docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}""#
+                .to_string(),
             folder: Some("Docker".to_string()),
             auto_execute: true,
         },

@@ -5,9 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use russh::client::{self, Config, Handle, Handler};
-use russh::keys::{
-    HashAlg, PrivateKeyWithHashAlg, PublicKeyOrCertificate, load_secret_key,
-};
+use russh::keys::{HashAlg, PrivateKeyWithHashAlg, PublicKeyOrCertificate, load_secret_key};
 use russh::{ChannelMsg, Pty};
 use russh_sftp::client::SftpSession;
 use sha2::{Digest, Sha256};
@@ -33,7 +31,10 @@ pub struct PtySize {
 
 impl Default for PtySize {
     fn default() -> Self {
-        Self { cols: 120, rows: 36 }
+        Self {
+            cols: 120,
+            rows: 36,
+        }
     }
 }
 
@@ -237,10 +238,19 @@ impl Handler for VelaClientHandler {
             return Ok(false);
         }
 
-        let accepted = rx.await.unwrap_or(false);
+        // A missing UI response must not leave a connection waiting forever.
+        let accepted = tokio::time::timeout(Duration::from_secs(120), rx)
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or(false);
         if accepted {
             if let Err(err) = self.known_hosts.trust(&self.host, self.port, &fingerprint) {
-                warn!("failed to persist trusted host key: {err}");
+                error!("failed to persist trusted host key: {err}");
+                if let Ok(mut guard) = self.host_key_error.lock() {
+                    *guard = Some(err);
+                }
+                return Ok(false);
             }
         } else {
             let err = match status {
@@ -273,8 +283,7 @@ pub fn cleanup_stale_edit_dirs() {
 }
 
 fn edit_cache_root() -> Option<PathBuf> {
-    directories::ProjectDirs::from("dev", "vela", "Vela")
-        .map(|p| p.cache_dir().join("edits"))
+    directories::ProjectDirs::from("dev", "vela", "Vela").map(|p| p.cache_dir().join("edits"))
 }
 
 struct TempDirGuard {
@@ -930,11 +939,7 @@ async fn file_sha256(path: &Path) -> Option<[u8; 32]> {
     Some(Sha256::digest(&bytes).into())
 }
 
-async fn refresh_dir(
-    sftp: &SftpSession,
-    path: &str,
-    event_tx: &mpsc::Sender<SessionEvent>,
-) {
+async fn refresh_dir(sftp: &SftpSession, path: &str, event_tx: &mpsc::Sender<SessionEvent>) {
     let canonical = resolve_canonical_path(sftp, path)
         .await
         .unwrap_or_else(|_| path.to_string());
@@ -972,7 +977,10 @@ fn spawn_edit_watcher(
                         event.kind,
                         notify::EventKind::Modify(_) | notify::EventKind::Create(_)
                     )
-                    && event.paths.iter().any(|p| p.file_name() == target_name.as_deref())
+                    && event
+                        .paths
+                        .iter()
+                        .any(|p| p.file_name() == target_name.as_deref())
                 {
                     let _ = tx.try_send(());
                 }

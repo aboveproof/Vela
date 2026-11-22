@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Download, Play, Server, Trash2 } from "lucide-react";
+import { ArrowRight, Download, Play, Search, Server, Trash2 } from "lucide-react";
 import type { HostProfile, ThemeTokens } from "../types";
 
 export interface QuickFormValues {
@@ -35,6 +35,7 @@ export function HostsPanel({
   onImportSshConfig,
 }: HostsPanelProps) {
   const [filter, setFilter] = useState("");
+  const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
 
   const filtered = profiles.filter((p) => {
     if (!filter.trim()) return true;
@@ -53,20 +54,22 @@ export function HostsPanel({
   };
 
   return (
-    <div className="flex h-full flex-col gap-3 overflow-y-auto pr-0.5">
-      <div className="flex items-center gap-1.5">
+    <div className="flex h-full flex-col gap-4 overflow-y-auto pr-0.5">
+      <div className="relative flex items-center gap-1.5">
+        <Search className="pointer-events-none absolute left-3 h-3.5 w-3.5" strokeWidth={1.7} style={{ color: theme.textMuted }} />
         <input
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
-          placeholder="Filter saved hosts..."
-          className="min-w-0 flex-1 rounded-lg border px-2.5 py-1.5 text-xs outline-none"
+          placeholder="Search connections"
+          aria-label="Search saved connections"
+          className="min-w-0 flex-1 rounded-xl border py-2.5 pl-9 pr-2 text-xs outline-none"
           style={inputStyle}
         />
         <button
           type="button"
           onClick={onImportSshConfig}
           title="Import hosts from ~/.ssh/config"
-          className="flex shrink-0 items-center gap-1 rounded-lg border px-2 py-1.5 text-[11px] transition-colors hover:bg-white/6"
+          className="flex h-9 shrink-0 items-center gap-1 rounded-xl border px-2 text-[11px] transition-colors hover:bg-white/6"
           style={{
             backgroundColor: theme.bgElevated,
             borderColor: theme.border,
@@ -79,22 +82,26 @@ export function HostsPanel({
       </div>
 
       <div className="space-y-1.5">
+        <div className="flex items-center justify-between px-0.5 pb-1 text-[11px]" style={{ color: theme.textMuted }}>
+          <span>Saved hosts</span><span className="tabular-nums">{filtered.length}</span>
+        </div>
         {filtered.length === 0 ? (
-          <div className="px-1 py-2 text-xs" style={{ color: theme.textMuted }}>
-            {profiles.length === 0 ? "No saved hosts yet. Add one below." : "No matching hosts."}
+          <div className="rounded-xl border px-4 py-5 text-center text-xs leading-5" style={{ color: theme.textMuted, borderColor: theme.border, backgroundColor: theme.bgBase }}>
+            {profiles.length === 0 ? "Add a connection below or import your SSH config." : "No hosts match your search."}
           </div>
         ) : (
           filtered.map((p) => (
+            <div key={p.id} className="space-y-1">
             <div
               key={p.id}
               onDoubleClick={() => onConnectProfile(p.id)}
-              className="group flex items-center gap-2 rounded-lg border px-2.5 py-2 transition-colors hover:bg-white/[0.03]"
+              className="group flex items-center gap-2.5 rounded-xl border px-3 py-2.5 transition-colors hover:bg-white/[0.03]"
               style={{
                 backgroundColor: theme.bgElevated,
                 borderColor: theme.border,
               }}
             >
-              <Server className="h-3.5 w-3.5 shrink-0" style={{ color: theme.textMuted }} />
+              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg" style={{ color: theme.accent, backgroundColor: theme.bgSurface }}><Server className="h-4 w-4" strokeWidth={1.6} /></span>
               <div className="min-w-0 flex-1">
                 <div className="truncate text-xs font-medium" style={{ color: theme.textPrimary }}>
                   {p.name}
@@ -107,19 +114,31 @@ export function HostsPanel({
               <button
                 onClick={() => onConnectProfile(p.id)}
                 title="Connect"
-                className="flex h-6 w-6 items-center justify-center rounded-md transition-opacity hover:opacity-85"
+                aria-label={`Connect to ${p.name}`}
+                className="flex h-7 w-7 items-center justify-center rounded-lg transition-opacity hover:opacity-85"
                 style={{ backgroundColor: theme.textPrimary, color: theme.bgBase }}
               >
                 <Play className="h-3 w-3 fill-current" />
               </button>
               <button
-                onClick={() => onDeleteProfile(p.id)}
+                onClick={() => setPendingDeleteId(p.id)}
                 title="Delete host"
-                className="flex h-6 w-6 items-center justify-center rounded-md opacity-60 transition-opacity hover:bg-white/10 hover:opacity-100"
+                aria-label={`Delete ${p.name}`}
+                className="flex h-7 w-7 items-center justify-center rounded-lg opacity-60 transition-opacity hover:bg-white/10 hover:opacity-100"
                 style={{ color: theme.danger }}
               >
                 <Trash2 className="h-3.5 w-3.5" />
               </button>
+            </div>
+            {pendingDeleteId === p.id && (
+              <div className="flex items-center justify-between gap-2 rounded-xl px-3 py-2 text-[11px]" style={{ color: theme.textPrimary, backgroundColor: theme.bgBase }}>
+                <span className="truncate">Delete {p.name}?</span>
+                <div className="flex shrink-0 gap-1">
+                  <button type="button" className="rounded-lg px-2 py-1" onClick={() => setPendingDeleteId(null)}>Cancel</button>
+                  <button type="button" className="rounded-lg px-2 py-1 font-semibold" style={{ color: theme.danger, backgroundColor: theme.bgElevated }} onClick={() => { onDeleteProfile(p.id); setPendingDeleteId(null); }}>Delete</button>
+                </div>
+              </div>
+            )}
             </div>
           ))
         )}
@@ -130,21 +149,22 @@ export function HostsPanel({
           e.preventDefault();
           onSaveAndConnect();
         }}
-        className="mt-1 space-y-2 rounded-xl border p-3"
+        className="mt-1 space-y-3 rounded-2xl border p-3.5"
         style={{
           backgroundColor: theme.bgBase,
           borderColor: theme.border,
         }}
       >
-        <div className="text-[11px] font-medium" style={{ color: theme.textMuted }}>
-          Quick Connect & Save
+        <div className="flex items-center justify-between text-xs font-semibold" style={{ color: theme.textPrimary }}>
+          <span>New connection</span><ArrowRight className="h-3.5 w-3.5" strokeWidth={1.5} style={{ color: theme.textMuted }} />
         </div>
 
         <input
           value={form.name}
           onChange={(e) => onChangeForm({ ...form, name: e.target.value })}
-          placeholder="Label (e.g. Homeserver)"
-          className="w-full rounded-lg border px-2.5 py-1.5 text-xs outline-none"
+          placeholder="Name (optional)"
+          aria-label="Connection name"
+          className="w-full rounded-xl border px-3 py-2 text-xs outline-none"
           style={inputStyle}
         />
 
@@ -153,14 +173,18 @@ export function HostsPanel({
             value={form.host}
             onChange={(e) => onChangeForm({ ...form, host: e.target.value })}
             placeholder="Host / IP"
-            className="min-w-0 flex-1 rounded-lg border px-2.5 py-1.5 text-xs outline-none"
+            aria-label="Host address"
+            required
+            className="min-w-0 flex-1 rounded-xl border px-3 py-2 text-xs outline-none"
             style={inputStyle}
           />
           <input
             value={form.port}
             onChange={(e) => onChangeForm({ ...form, port: e.target.value })}
             placeholder="22"
-            className="w-16 rounded-lg border px-2 py-1.5 text-center text-xs outline-none"
+            aria-label="SSH port"
+            inputMode="numeric"
+            className="w-16 rounded-xl border px-2 py-2 text-center text-xs outline-none"
             style={inputStyle}
           />
         </div>
@@ -169,18 +193,20 @@ export function HostsPanel({
           value={form.username}
           onChange={(e) => onChangeForm({ ...form, username: e.target.value })}
           placeholder="Username"
-          className="w-full rounded-lg border px-2.5 py-1.5 text-xs outline-none"
+          aria-label="SSH username"
+          required
+          className="w-full rounded-xl border px-3 py-2 text-xs outline-none"
           style={inputStyle}
         />
 
         <div
-          className="grid grid-cols-2 gap-1 rounded-lg border p-0.5 text-[11px]"
+          className="grid grid-cols-2 gap-1 rounded-xl border p-1 text-[11px]"
           style={{ borderColor: theme.border, backgroundColor: theme.bgSurface }}
         >
           <button
             type="button"
             onClick={() => onChangeForm({ ...form, useKey: false })}
-            className="rounded-md py-1 font-medium transition-colors"
+            className="rounded-lg py-1.5 font-medium transition-colors"
             style={{
               backgroundColor: !form.useKey ? theme.bgElevated : "transparent",
               color: !form.useKey ? theme.textPrimary : theme.textMuted,
@@ -191,7 +217,7 @@ export function HostsPanel({
           <button
             type="button"
             onClick={() => onChangeForm({ ...form, useKey: true })}
-            className="rounded-md py-1 font-medium transition-colors"
+            className="rounded-lg py-1.5 font-medium transition-colors"
             style={{
               backgroundColor: form.useKey ? theme.bgElevated : "transparent",
               color: form.useKey ? theme.textPrimary : theme.textMuted,
@@ -207,7 +233,9 @@ export function HostsPanel({
               value={form.keyPath}
               onChange={(e) => onChangeForm({ ...form, keyPath: e.target.value })}
               placeholder="Private key path (~/.ssh/id_ed25519)"
-              className="w-full rounded-lg border px-2.5 py-1.5 text-xs outline-none"
+              aria-label="Private key path"
+              required
+              className="w-full rounded-xl border px-3 py-2 text-xs outline-none"
               style={inputStyle}
             />
             <input
@@ -215,7 +243,8 @@ export function HostsPanel({
               value={form.passphrase}
               onChange={(e) => onChangeForm({ ...form, passphrase: e.target.value })}
               placeholder="Passphrase (optional)"
-              className="w-full rounded-lg border px-2.5 py-1.5 text-xs outline-none"
+              aria-label="Private key passphrase"
+              className="w-full rounded-xl border px-3 py-2 text-xs outline-none"
               style={inputStyle}
             />
           </>
@@ -225,17 +254,18 @@ export function HostsPanel({
             value={form.password}
             onChange={(e) => onChangeForm({ ...form, password: e.target.value })}
             placeholder="Password"
-            className="w-full rounded-lg border px-2.5 py-1.5 text-xs outline-none"
+            aria-label="SSH password"
+            className="w-full rounded-xl border px-3 py-2 text-xs outline-none"
             style={inputStyle}
           />
         )}
 
         <button
           type="submit"
-          className="w-full rounded-lg py-1.5 text-xs font-medium transition-opacity hover:opacity-90"
+          className="w-full rounded-xl py-2.5 text-xs font-semibold transition-opacity hover:opacity-90"
           style={{ backgroundColor: theme.textPrimary, color: theme.bgBase }}
         >
-          Save & Connect
+          Save and connect
         </button>
       </form>
     </div>

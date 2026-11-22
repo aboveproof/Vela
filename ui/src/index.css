@@ -12,7 +12,7 @@ body,
   width: 100%;
   margin: 0;
   padding: 0;
-  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-family: "Aptos", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
   font-feature-settings: "cv02", "cv03", "cv04", "cv11";
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
@@ -40,8 +40,113 @@ body,
 }
 
 .xterm {
-  padding: 8px 10px;
+  padding: 16px 19px;
   height: 100%;
+}
+
+button, input, select, textarea {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
+button, input, select, textarea {
+  transition: background-color 180ms cubic-bezier(.2,.8,.2,1), border-color 180ms cubic-bezier(.2,.8,.2,1), color 180ms cubic-bezier(.2,.8,.2,1), transform 180ms cubic-bezier(.2,.8,.2,1);
+}
+
+button:active:not(:disabled) {
+  transform: scale(.975);
+}
+
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, [role="menuitem"]:focus-visible {
+  outline: 2px solid var(--vela-accent, #a4aebe);
+  outline-offset: 2px;
+}
+
+input::placeholder, textarea::placeholder {
+  color: var(--vela-muted, #8a8f98);
+  opacity: .78;
+}
+
+.vela-app {
+  background-image: radial-gradient(ellipse 60% 45% at 65% -20%, color-mix(in srgb, var(--vela-accent) 7%, transparent), transparent);
+}
+
+.vela-titlebar {
+  background-image: linear-gradient(180deg, color-mix(in srgb, var(--vela-surface) 55%, transparent), transparent);
+}
+
+.vela-tablist {
+  scrollbar-width: none;
+}
+.vela-tablist::-webkit-scrollbar {
+  display: none;
+}
+
+.vela-brand-symbol {
+  box-shadow: inset 0 1px 0 #ffffff4a, 0 3px 12px #00000022;
+}
+
+.vela-rail {
+  background-image: linear-gradient(180deg, color-mix(in srgb, var(--vela-surface) 30%, transparent), transparent 55%);
+}
+
+.vela-rail-button[aria-pressed="true"]::before {
+  content: "";
+  position: absolute;
+  left: -10px;
+  width: 2px;
+  height: 21px;
+  border-radius: 2px;
+  background: var(--vela-accent);
+}
+
+.vela-sidebar {
+  min-width: 0;
+  box-shadow: inset -1px 0 color-mix(in srgb, #fff 2%, transparent);
+}
+
+.vela-sidebar input:focus, .vela-sidebar select:focus, .vela-sidebar textarea:focus {
+  border-color: color-mix(in srgb, var(--vela-accent) 55%, var(--vela-border)) !important;
+}
+
+.vela-terminal-shell {
+  box-shadow: 0 8px 30px #00000012, inset 0 1px #ffffff09;
+}
+
+.vela-empty {
+  background-image: radial-gradient(circle at center, color-mix(in srgb, var(--vela-accent) 5%, transparent), transparent 60%);
+}
+
+.vela-empty-mark {
+  box-shadow: inset 0 1px #ffffff17, 0 14px 36px #0000002d;
+}
+
+.vela-empty-action:hover {
+  filter: brightness(1.12);
+}
+
+.vela-status {
+  letter-spacing: .005em;
+}
+
+@media (max-width: 920px) {
+  .vela-command-button span, .vela-command-button kbd { display: none; }
+  .vela-command-button { width: 34px; justify-content: center; padding: 0; }
+}
+
+@media (max-width: 720px) {
+  .vela-sidebar { max-width: min(45vw, 300px); padding: 10px; }
+  .vela-brand span:last-child { display: none; }
+  .vela-workspace { padding: 6px; }
+  .vela-rail { width: 48px; }
+  .vela-rail-button { width: 36px; height: 36px; }
 }
 
 .xterm-viewport {
@@ -133,5 +238,8 @@ body,
   .palette-enter,
   .backdrop-enter {
     animation: none;
+  }
+  button, input, select, textarea {
+    transition: none;
   }
 }

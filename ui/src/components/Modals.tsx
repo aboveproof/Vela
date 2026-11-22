@@ -290,6 +290,7 @@ function ChmodModalBody({
   const initialMode = entry.permissions & 0o7777;
   const [mode, setMode] = useState(initialMode);
   const [octal, setOctal] = useState(initialMode.toString(8).padStart(4, "0"));
+  const validOctal = /^[0-7]{1,4}$/.test(octal);
 
   const toggle = (bit: number) => {
     const next = mode ^ bit;
@@ -307,7 +308,7 @@ function ChmodModalBody({
     <form
       onSubmit={(e) => {
         e.preventDefault();
-        onSubmit(mode & 0o7777);
+        if (validOctal) onSubmit(mode & 0o7777);
       }}
     >
       <h3 className="truncate text-sm font-medium" style={{ color: theme.textPrimary }}>
@@ -340,11 +341,14 @@ function ChmodModalBody({
           <span style={{ color: theme.textMuted }}>Octal:</span>
           <input
             value={octal}
+            aria-label="Permissions in octal"
+            aria-invalid={!validOctal}
+            maxLength={4}
             onChange={(e) => {
               const raw = e.target.value;
               setOctal(raw);
-              if (/^[0-7]{1,4}$/.test(raw.trim())) {
-                setMode(parseInt(raw.trim(), 8) & 0o7777);
+              if (/^[0-7]{1,4}$/.test(raw)) {
+                setMode(parseInt(raw, 8) & 0o7777);
               }
             }}
             className="w-20 rounded-lg border px-2.5 py-1 font-mono text-xs outline-none"
@@ -354,6 +358,11 @@ function ChmodModalBody({
               color: theme.textPrimary,
             }}
           />
+          {!validOctal && (
+            <span role="alert" style={{ color: theme.danger }}>
+              Enter 1–4 octal digits (0–7).
+            </span>
+          )}
         </div>
       </div>
       <div className="mt-4 flex justify-end gap-2">
@@ -367,7 +376,8 @@ function ChmodModalBody({
         </button>
         <button
           type="submit"
-          className="rounded-lg px-3.5 py-1.5 text-xs font-medium transition-opacity hover:opacity-90"
+          disabled={!validOctal}
+          className="rounded-lg px-3.5 py-1.5 text-xs font-medium transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
           style={{ backgroundColor: theme.textPrimary, color: theme.bgBase }}
         >
           Apply

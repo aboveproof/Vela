@@ -7,8 +7,8 @@
 </p>
 
 <p>
-  <a href="https://github.com/aboveproof/Vela/blob/main/LICENSE-MIT">
-    <img src="https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-2c2f36?style=flat-square" alt="License: MIT or Apache-2.0" />
+  <a href="https://github.com/aboveproof/Vela/blob/main/LICENSE">
+    <img src="https://img.shields.io/badge/license-MIT-2c2f36?style=flat-square" alt="License: MIT" />
   </a>
   <img src="https://img.shields.io/badge/rust-edition%202024-b7410e?style=flat-square&logo=rust&logoColor=white" alt="Rust Edition 2024" />
   <img src="https://img.shields.io/badge/tauri-v2-24c8db?style=flat-square&logo=tauri&logoColor=white" alt="Tauri v2" />
@@ -27,7 +27,7 @@
 
 ---
 
-Vela pairs a pure-Rust SSH and SFTP engine (`russh` + `russh-sftp`) with a native WebView2 / WebKit desktop shell (`Tauri v2`) and hardware-accelerated `xterm.js` WebGL rendering. You get MobaXterm's side-by-side SFTP browser and live host monitor in a dark, quiet interface that sits near 0% GPU and CPU at idle.
+Vela pairs a Rust SSH and SFTP engine (`russh` + `russh-sftp`) with a Tauri v2 desktop shell and an `xterm.js` terminal. Browse files beside a session, keep several hosts open, and watch host activity without leaving the window.
 
 <h2 id="features">Features</h2>
 
@@ -83,9 +83,9 @@ flowchart LR
 
 ### Engineering Standards
 
-- **Zero runtime panics in Rust crates:** Workspace lints set `unsafe_code = "forbid"`, `clippy::unwrap_used = "deny"`, `clippy::expect_used = "deny"`, and `clippy::panic = "deny"`.
+- **Strict Rust linting:** Workspace lints forbid unsafe code and deny `unwrap`, `expect`, and explicit `panic` in Clippy checks.
 - **Atomic config writes:** Saved hosts (`hosts.toml`), settings (`settings.toml`), and `known_hosts` write to a sibling `.tmp` file before renaming.
-- **Event-driven IPC:** Tokio tasks push PTY chunks, SFTP listings, and telemetry events to the frontend as packets arrive. No background polling loop wakes the GPU while idle.
+- **Event-driven IPC:** Tokio tasks push PTY chunks and connection events to the frontend. The host monitor samples system activity while connected.
 - **Rotating diagnostics:** Structured `tracing` logs rotate daily in the OS local data directory.
 
 <h2 id="getting-started">Getting Started</h2>
@@ -119,6 +119,7 @@ cargo run --release -p vela
 ```bash
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+cd ui && npm ci && npm run build
 ```
 
 <details>

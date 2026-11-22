@@ -195,7 +195,10 @@ pub fn validate_public_key_for_deploy(public_key: &str) -> VelaResult<String> {
     if trimmed.is_empty() {
         return Err(VelaError::Config("Public key cannot be empty".into()));
     }
-    if trimmed.chars().any(|c| c == '\n' || c == '\r' || c.is_control()) {
+    if trimmed
+        .chars()
+        .any(|c| c == '\n' || c == '\r' || c.is_control())
+    {
         return Err(VelaError::Config(
             "Public key must be a single line with no control characters".into(),
         ));

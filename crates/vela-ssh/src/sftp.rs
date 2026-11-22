@@ -117,14 +117,10 @@ pub fn sanitize_local_filename(remote_path: &str) -> VelaResult<String> {
         });
     }
 
-    let stem = raw
-        .split('.')
-        .next()
-        .unwrap_or(raw)
-        .to_ascii_uppercase();
+    let stem = raw.split('.').next().unwrap_or(raw).to_ascii_uppercase();
     const RESERVED: [&str; 22] = [
-        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
-        "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
     ];
     if RESERVED.contains(&stem.as_str()) {
         return Err(VelaError::Sftp {
@@ -261,15 +257,25 @@ pub async fn download_file(
     remote_path: &str,
     local_path: &Path,
 ) -> VelaResult<u64> {
-    let mut remote = sftp.open(remote_path).await.map_err(|err| VelaError::Sftp {
-        path: remote_path.to_string(),
-        reason: err.to_string(),
-    })?;
+    let mut remote = sftp
+        .open(remote_path)
+        .await
+        .map_err(|err| VelaError::Sftp {
+            path: remote_path.to_string(),
+            reason: err.to_string(),
+        })?;
 
     if let Some(parent) = local_path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
-    let mut local = tokio::fs::File::create(local_path).await?;
+    // Never truncate the user's chosen destination until the entire transfer succeeds.
+    let temporary =
+        local_path.with_file_name(format!(".vela-download-{}.part", uuid::Uuid::new_v4()));
+    let mut local = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .await?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -294,15 +300,25 @@ pub async fn download_file(
             total += n as u64;
         }
         local.flush().await?;
+        local.sync_all().await?;
         Ok(total)
     }
     .await;
 
-    if copy_res.is_err() {
-        drop(local);
-        let _ = tokio::fs::remove_file(local_path).await;
+    drop(local);
+    match copy_res {
+        Ok(bytes) => {
+            if let Err(err) = tokio::fs::rename(&temporary, local_path).await {
+                let _ = tokio::fs::remove_file(&temporary).await;
+                return Err(err.into());
+            }
+            Ok(bytes)
+        }
+        Err(err) => {
+            let _ = tokio::fs::remove_file(&temporary).await;
+            Err(err)
+        }
     }
-    copy_res
 }
 
 pub async fn upload_file(
@@ -416,11 +432,7 @@ pub async fn create_empty_file(sftp: &SftpSession, path: &str) -> VelaResult<()>
     Ok(())
 }
 
-pub async fn rename_remote(
-    sftp: &SftpSession,
-    old_path: &str,
-    new_path: &str,
-) -> VelaResult<()> {
+pub async fn rename_remote(sftp: &SftpSession, old_path: &str, new_path: &str) -> VelaResult<()> {
     sftp.rename(old_path, new_path)
         .await
         .map_err(|err| VelaError::Sftp {
@@ -446,10 +458,10 @@ pub async fn chmod_remote(sftp: &SftpSession, path: &str, mode: u32) -> VelaResu
 /// Never follows a top-level symlink and never deletes `/`.
 pub async fn delete_remote(sftp: &SftpSession, path: &str) -> VelaResult<()> {
     let normalized = path.trim();
-    if normalized.is_empty() || normalized == "/" || normalized == "." || normalized == ".." {
+    if !is_safe_delete_path(normalized) {
         return Err(VelaError::Sftp {
             path: path.to_string(),
-            reason: "refusing to delete root or relative path".to_string(),
+            reason: "delete requires an absolute path without '.' or '..' components".to_string(),
         });
     }
 
@@ -475,10 +487,29 @@ pub async fn delete_remote(sftp: &SftpSession, path: &str) -> VelaResult<()> {
     let mut stack = vec![(normalized.to_string(), false)];
     while let Some((curr, visited)) = stack.pop() {
         if visited {
-            sftp.remove_dir(&curr).await.map_err(|err| VelaError::Sftp {
-                path: curr,
+            sftp.remove_dir(&curr)
+                .await
+                .map_err(|err| VelaError::Sftp {
+                    path: curr,
+                    reason: err.to_string(),
+                })?;
+            continue;
+        }
+        // A directory may have become a symlink after listing. Never follow it.
+        let current_meta = sftp
+            .symlink_metadata(&curr)
+            .await
+            .map_err(|err| VelaError::Sftp {
+                path: curr.clone(),
                 reason: err.to_string(),
             })?;
+        if !current_meta.is_dir() {
+            sftp.remove_file(&curr)
+                .await
+                .map_err(|err| VelaError::Sftp {
+                    path: curr,
+                    reason: err.to_string(),
+                })?;
             continue;
         }
         stack.push((curr.clone(), true));
@@ -499,6 +530,15 @@ pub async fn delete_remote(sftp: &SftpSession, path: &str) -> VelaResult<()> {
     Ok(())
 }
 
+/// Refuse root and aliases of root before asking the server to resolve a path.
+/// In particular, `/tmp/..` and `//` must never reach a recursive delete.
+fn is_safe_delete_path(path: &str) -> bool {
+    path.starts_with('/')
+        && path.split('/').any(|part| !part.is_empty())
+        && !path.split('/').any(|part| part == "." || part == "..")
+        && !path.chars().any(char::is_control)
+}
+
 /// Reads up to `max_bytes` of a remote text file for inline preview.
 /// Rejects directories and binary files (NUL byte in the first 4 KiB).
 pub async fn read_file_preview(
@@ -506,10 +546,13 @@ pub async fn read_file_preview(
     remote_path: &str,
     max_bytes: usize,
 ) -> VelaResult<FilePreview> {
-    let meta = sftp.metadata(remote_path).await.map_err(|err| VelaError::Sftp {
-        path: remote_path.to_string(),
-        reason: err.to_string(),
-    })?;
+    let meta = sftp
+        .metadata(remote_path)
+        .await
+        .map_err(|err| VelaError::Sftp {
+            path: remote_path.to_string(),
+            reason: err.to_string(),
+        })?;
     if meta.is_dir() {
         return Err(VelaError::Sftp {
             path: remote_path.to_string(),
@@ -517,10 +560,13 @@ pub async fn read_file_preview(
         });
     }
 
-    let mut remote = sftp.open(remote_path).await.map_err(|err| VelaError::Sftp {
-        path: remote_path.to_string(),
-        reason: err.to_string(),
-    })?;
+    let mut remote = sftp
+        .open(remote_path)
+        .await
+        .map_err(|err| VelaError::Sftp {
+            path: remote_path.to_string(),
+            reason: err.to_string(),
+        })?;
 
     let limit = max_bytes.saturating_add(1);
     let mut buf = Vec::with_capacity(limit.min(64 * 1024));
@@ -558,8 +604,8 @@ pub(crate) fn build_file_preview(
         });
     }
 
-    let truncated = raw_bytes.len() > max_bytes
-        || reported_size.is_some_and(|s| s > max_bytes as u64);
+    let truncated =
+        raw_bytes.len() > max_bytes || reported_size.is_some_and(|s| s > max_bytes as u64);
     let slice = if raw_bytes.len() > max_bytes {
         &raw_bytes[..max_bytes]
     } else {
@@ -610,6 +656,18 @@ mod tests {
         assert!(!is_dangerous_executable_ext("docker-compose.yml"));
         assert!(validate_remote_entry_name("../etc").is_err());
         assert!(validate_remote_entry_name("ok_file.txt").is_ok());
+    }
+
+    #[test]
+    fn delete_path_rejects_root_aliases_and_relative_paths() {
+        for path in [
+            "", "/", "//", "./", "..", "foo", "/tmp/..", "/tmp/./x", "/tmp\n/x",
+        ] {
+            assert!(!is_safe_delete_path(path), "accepted {path:?}");
+        }
+        for path in ["/tmp/file", "/tmp/folder/", "/a//b"] {
+            assert!(is_safe_delete_path(path), "rejected {path:?}");
+        }
     }
 
     #[test]
