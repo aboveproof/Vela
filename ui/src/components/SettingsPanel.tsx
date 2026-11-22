@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { THEMES, type AppSettings, type CursorStyle, type ThemeId, type ThemeTokens } from "../types";
 
 interface SettingsPanelProps {
@@ -29,6 +29,10 @@ const SCROLLBACKS = [
 
 export function SettingsPanel({ settings, theme, onUpdateSettings }: SettingsPanelProps) {
   const [customFont, setCustomFont] = useState(settings.terminal_font ?? "");
+
+  useEffect(() => {
+    setCustomFont(settings.terminal_font ?? "");
+  }, [settings.terminal_font]);
 
   const chipStyle = (active: boolean) => ({
     backgroundColor: active ? theme.bgElevated : theme.bgBase,

@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { Folder, Server, Settings } from "lucide-react";
 import { ContextMenu, type ContextMenuState } from "./components/ContextMenu";
 import { HostsPanel, type QuickFormValues } from "./components/HostsPanel";
@@ -50,6 +49,21 @@ const EMPTY_FORM: QuickFormValues = {
   passphrase: "",
 };
 
+function decodeBase64ToBytes(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) {
+    bytes[i] = bin.charCodeAt(i);
+  }
+  return bytes;
+}
+
+/** Unconditionally single-quotes a remote path and strips ASCII control chars to prevent PTY injection. */
+function shellQuote(path: string): string {
+  const clean = path.replace(/[\x00-\x1f\x7f]/g, "");
+  return `'${clean.replace(/'/g, "'\\''")}'`;
+}
+
 export function App() {
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [profiles, setProfiles] = useState<HostProfile[]>([]);
@@ -63,10 +77,14 @@ export function App() {
   const [selectedSftpPath, setSelectedSftpPath] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [activeModal, setActiveModal] = useState<ActiveModal | null>(null);
-  const [hostKeyPrompt, setHostKeyPrompt] = useState<HostKeyPrompt | null>(null);
+  const [hostKeyPrompts, setHostKeyPrompts] = useState<HostKeyPrompt[]>([]);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
 
   const termRefs = useRef<Map<string, TerminalPaneHandle>>(new Map());
+  const ptyWritersRef = useRef<Map<string, (bytes: Uint8Array) => void>>(new Map());
+  const ptyBuffersRef = useRef<Map<string, Uint8Array[]>>(new Map());
+  const resizeCleanupRef = useRef<(() => void) | null>(null);
+
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
   const activeSessionIdRef = useRef(activeSessionId);
@@ -87,7 +105,23 @@ export function App() {
 
   const persistSettings = useCallback((next: AppSettings) => {
     setSettings(next);
-    void invoke("save_settings", { settings: next });
+    void invoke("save_settings", { settings: next }).catch((err: unknown) => {
+      pushToast("Failed to save settings", "error", String(err));
+    });
+  }, [pushToast]);
+
+  const registerPtyWriter = useCallback(
+    (sessionId: string, writer: ((bytes: Uint8Array) => void) | null) => {
+      if (writer) ptyWritersRef.current.set(sessionId, writer);
+      else ptyWritersRef.current.delete(sessionId);
+    },
+    [],
+  );
+
+  const drainBufferedPty = useCallback((sessionId: string): Uint8Array[] => {
+    const chunks = ptyBuffersRef.current.get(sessionId) ?? [];
+    ptyBuffersRef.current.delete(sessionId);
+    return chunks;
   }, []);
 
   // Load initial profiles & settings from Rust backend.
@@ -97,6 +131,18 @@ export function App() {
       .then(setProfiles)
       .catch((err: unknown) => pushToast("Failed to load hosts", "error", String(err)));
   }, [pushToast]);
+
+  // Clear SFTP selection when switching tabs or directories.
+  useEffect(() => {
+    setSelectedSftpPath(null);
+  }, [activeSessionId, activeSession?.sftpPath]);
+
+  // Clean up any active sidebar drag listeners on unmount.
+  useEffect(() => {
+    return () => {
+      resizeCleanupRef.current?.();
+    };
+  }, []);
 
   // Global keyboard shortcuts (Ctrl+B toggles sidebar).
   useEffect(() => {
@@ -110,39 +156,57 @@ export function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  // Subscribe to Rust push events (zero polling!).
+  // Subscribe to Rust push events with StrictMode-safe cancellation (zero leaks, zero polling).
   useEffect(() => {
+    let cancelled = false;
     const unsubs: (() => void)[] = [];
 
-    void listen<{
-      session_id: string;
-      state: "connected" | "disconnected";
-      initial_dir?: string;
-    }>("vela://state", (ev) => {
-      const { session_id, state, initial_dir } = ev.payload;
-      setSessions((prev) =>
-        prev.map((s) =>
-          s.id === session_id
-            ? { ...s, state, sftpPath: initial_dir ?? s.sftpPath }
-            : s,
-        ),
-      );
-    }).then((u) => unsubs.push(u));
+    const sub = <T,>(event: string, handler: (payload: T) => void) => {
+      void listen<T>(event, (ev) => {
+        if (!cancelled) handler(ev.payload);
+      }).then((unlisten) => {
+        if (cancelled) unlisten();
+        else unsubs.push(unlisten);
+      });
+    };
 
-    void listen<{ session_id: string; path: string; entries: RemoteEntry[] }>(
+    sub<{ session_id: string; data_b64: string }>("vela://pty", ({ session_id, data_b64 }) => {
+      const bytes = decodeBase64ToBytes(data_b64);
+      const writer = ptyWritersRef.current.get(session_id);
+      if (writer) {
+        writer(bytes);
+      } else {
+        const buf = ptyBuffersRef.current.get(session_id) ?? [];
+        if (buf.length < 512) {
+          buf.push(bytes);
+          ptyBuffersRef.current.set(session_id, buf);
+        }
+      }
+    });
+
+    sub<{ session_id: string; state: "connected" | "disconnected"; initial_dir?: string }>(
+      "vela://state",
+      ({ session_id, state, initial_dir }) => {
+        setSessions((prev) =>
+          prev.map((s) =>
+            s.id === session_id ? { ...s, state, sftpPath: initial_dir ?? s.sftpPath } : s,
+          ),
+        );
+      },
+    );
+
+    sub<{ session_id: string; path: string; entries: RemoteEntry[] }>(
       "vela://sftp",
-      (ev) => {
-        const { session_id, path, entries } = ev.payload;
+      ({ session_id, path, entries }) => {
         setSessions((prev) =>
           prev.map((s) =>
             s.id === session_id ? { ...s, sftpPath: path, sftpEntries: entries } : s,
           ),
         );
       },
-    ).then((u) => unsubs.push(u));
+    );
 
-    void listen<{ session_id: string; stats: ServerStats }>("vela://stats", (ev) => {
-      const { session_id, stats } = ev.payload;
+    sub<{ session_id: string; stats: ServerStats }>("vela://stats", ({ session_id, stats }) => {
       setSessions((prev) =>
         prev.map((s) => {
           if (s.id !== session_id) return s;
@@ -150,63 +214,81 @@ export function App() {
           return { ...s, stats, cpuHistory: nextHist };
         }),
       );
-    }).then((u) => unsubs.push(u));
+    });
 
-    void listen<HostKeyPrompt>("vela://host-key", (ev) => {
-      setHostKeyPrompt(ev.payload);
-    }).then((u) => unsubs.push(u));
+    sub<HostKeyPrompt>("vela://host-key", (prompt) => {
+      setHostKeyPrompts((prev) => [...prev, prompt]);
+    });
 
-    void listen<{ session_id: string; message: string }>("vela://notice", (ev) => {
-      pushToast(ev.payload.message, "info");
-    }).then((u) => unsubs.push(u));
+    sub<{ session_id: string; message: string }>("vela://notice", ({ message }) => {
+      pushToast(message, "info");
+    });
 
-    void listen<{ session_id: string; error: { title: string; detail: string } }>(
+    sub<{ session_id: string; error: { title: string; detail: string } }>(
       "vela://error",
-      (ev) => {
-        pushToast(ev.payload.error.title, "error", ev.payload.error.detail);
+      ({ error }) => {
+        pushToast(error.title, "error", error.detail);
       },
-    ).then((u) => unsubs.push(u));
+    );
 
-    // Native OS drag-and-drop onto window -> upload into active SFTP directory.
-    void listen<{ paths: string[] }>("tauri://drag-drop", (ev) => {
+    // Native OS drag-and-drop onto window -> upload files or folders into active SFTP directory.
+    sub<{ paths: string[] }>("tauri://drag-drop", ({ paths }) => {
       const sid = activeSessionIdRef.current;
       const active = sessionsRef.current.find((s) => s.id === sid);
-      if (!active) return;
-      for (const localPath of ev.payload.paths) {
-        void invoke("sftp_upload", {
+      if (!active || paths.length === 0) return;
+      for (const localPath of paths) {
+        void invoke("sftp_upload_dropped", {
           sessionId: active.id,
           localPath,
           remoteDir: active.sftpPath,
+        }).catch((err: unknown) => {
+          pushToast("Upload failed", "error", String(err));
         });
       }
-    }).then((u) => unsubs.push(u));
+    });
 
     return () => {
+      cancelled = true;
       for (const u of unsubs) u();
     };
   }, [pushToast]);
 
   const connectProfile = async (profileId: string) => {
+    const profile = profiles.find((p) => p.id === profileId);
+    const sessionId = crypto.randomUUID();
+    const tab: SessionTab = {
+      id: sessionId,
+      title: profile?.name ?? "Connecting...",
+      address: profile
+        ? `${profile.username}@${profile.host}${profile.port !== 22 ? `:${profile.port}` : ""}`
+        : "",
+      state: "connecting",
+      sftpPath: "/",
+      sftpEntries: [],
+      stats: null,
+      cpuHistory: [],
+    };
+
+    // Register tab BEFORE invoking connect_profile so early MOTD/state/SFTP events are never lost.
+    setSessions((prev) => [...prev, tab]);
+    setActiveSessionId(sessionId);
+    setSidebarTab("sftp");
+    setSidebarOpen(true);
+
     try {
       const res = await invoke<{ session_id: string; title: string; address: string }>(
         "connect_profile",
-        { profileId, cols: 120, rows: 36 },
+        { sessionId, profileId, cols: 120, rows: 36 },
       );
-      const tab: SessionTab = {
-        id: res.session_id,
-        title: res.title,
-        address: res.address,
-        state: "connecting",
-        sftpPath: "/",
-        sftpEntries: [],
-        stats: null,
-        cpuHistory: [],
-      };
-      setSessions((prev) => [...prev, tab]);
-      setActiveSessionId(res.session_id);
-      setSidebarTab("sftp");
-      setSidebarOpen(true);
+      setSessions((prev) =>
+        prev.map((s) =>
+          s.id === sessionId ? { ...s, title: res.title, address: res.address } : s,
+        ),
+      );
     } catch (err) {
+      ptyBuffersRef.current.delete(sessionId);
+      setSessions((prev) => prev.filter((s) => s.id !== sessionId));
+      setActiveSessionId((curr) => (curr === sessionId ? null : curr));
       pushToast("Connection failed", "error", String(err));
     }
   };
@@ -216,12 +298,22 @@ export function App() {
       pushToast("Missing fields", "error", "Enter both a host address and username.");
       return;
     }
+    const parsedPort = Number.parseInt(form.port.trim(), 10);
+    if (Number.isNaN(parsedPort) || parsedPort < 1 || parsedPort > 65535) {
+      pushToast("Invalid port", "error", "Port must be between 1 and 65535.");
+      return;
+    }
+    if (form.useKey && !form.keyPath.trim()) {
+      pushToast("Missing key path", "error", "Enter the path to your SSH private key.");
+      return;
+    }
+
     try {
       const created = await invoke<HostProfile>("save_profile", {
         input: {
           name: form.name,
           host: form.host,
-          port: parseInt(form.port, 10) || 22,
+          port: parsedPort,
           username: form.username,
           use_key: form.useKey,
           password: form.password || null,
@@ -249,13 +341,15 @@ export function App() {
   const handleCloseTab = (id: string) => {
     void invoke("disconnect_session", { sessionId: id });
     termRefs.current.delete(id);
-    setSessions((prev) => {
-      const next = prev.filter((s) => s.id !== id);
-      if (activeSessionId === id) {
-        setActiveSessionId(next.length > 0 ? next[next.length - 1].id : null);
-      }
-      return next;
-    });
+    ptyWritersRef.current.delete(id);
+    ptyBuffersRef.current.delete(id);
+    setHostKeyPrompts((prev) => prev.filter((p) => p.session_id !== id));
+
+    const remaining = sessionsRef.current.filter((s) => s.id !== id);
+    setSessions(remaining);
+    if (activeSessionIdRef.current === id) {
+      setActiveSessionId(remaining.length > 0 ? remaining[remaining.length - 1].id : null);
+    }
   };
 
   const handleQuickConnectSubmit = () => {
@@ -273,14 +367,38 @@ export function App() {
       void connectProfile(matched.id);
       return;
     }
-    if (q.includes("@")) {
-      const [user, hostPort] = q.split("@");
-      const [host, port = "22"] = hostPort.split(":");
+
+    const atIdx = q.lastIndexOf("@");
+    if (atIdx > 0 && atIdx < q.length - 1) {
+      const user = q.slice(0, atIdx);
+      const hostPort = q.slice(atIdx + 1);
+      let host = hostPort;
+      let port = "22";
+
+      if (hostPort.startsWith("[")) {
+        const closeBracket = hostPort.indexOf("]");
+        if (closeBracket > 1) {
+          host = hostPort.slice(1, closeBracket);
+          if (hostPort[closeBracket + 1] === ":") {
+            port = hostPort.slice(closeBracket + 2) || "22";
+          }
+        }
+      } else {
+        const colonIdx = hostPort.lastIndexOf(":");
+        if (colonIdx > 0 && hostPort.indexOf(":") === colonIdx) {
+          host = hostPort.slice(0, colonIdx);
+          port = hostPort.slice(colonIdx + 1) || "22";
+        }
+      }
+
       setForm((prev) => ({ ...prev, name: host, username: user, host, port }));
       setSidebarTab("hosts");
       setSidebarOpen(true);
       pushToast(`Pre-filled ${user}@${host}:${port}`, "info");
+      return;
     }
+
+    pushToast("No matching host", "info", "Use user@host[:port] to pre-fill a new connection.");
   };
 
   // SFTP actions
@@ -289,57 +407,36 @@ export function App() {
 
   const sftpOpenEntry = (entry: RemoteEntry) => {
     if (!activeSession) return;
-    if (entry.kind === "directory" || entry.kind === "symlink") {
-      void invoke("sftp_list_dir", { sessionId: activeSession.id, path: entry.path });
-    } else {
-      void invoke("sftp_edit_locally", { sessionId: activeSession.id, remotePath: entry.path });
-    }
+    void invoke("sftp_open_entry", { sessionId: activeSession.id, path: entry.path }).catch(
+      (err: unknown) => pushToast("Failed to open entry", "error", String(err)),
+    );
   };
 
-  const sftpDownloadEntry = async (entry: RemoteEntry) => {
+  const sftpDownloadEntry = (entry: RemoteEntry) => {
     if (!activeSession) return;
     if (entry.kind === "directory") {
       pushToast("Select a file to download", "info");
       return;
     }
-    const localPath = await saveDialog({ defaultPath: entry.name });
-    if (localPath) {
-      void invoke("sftp_download", {
-        sessionId: activeSession.id,
-        remotePath: entry.path,
-        localPath,
-      });
-    }
+    void invoke("sftp_download_dialog", {
+      sessionId: activeSession.id,
+      remotePath: entry.path,
+      defaultName: entry.name,
+    }).catch((err: unknown) => pushToast("Download failed", "error", String(err)));
   };
 
-  const sftpUploadPicker = async () => {
+  const sftpUploadPicker = () => {
     if (!activeSession) return;
-    const picked = await openDialog({ multiple: true });
-    if (!picked) return;
-    const files = Array.isArray(picked) ? picked : [picked];
-    for (const localPath of files) {
-      void invoke("sftp_upload", {
-        sessionId: activeSession.id,
-        localPath,
-        remoteDir: activeSession.sftpPath,
-      });
-    }
-  };
-
-  const shellQuote = (path: string): string => {
-    if (/[\s"'$&|;()<>?*\\]/.test(path)) {
-      return `'${path.replace(/'/g, "'\\''")}'`;
-    }
-    return path;
+    void invoke("sftp_upload_dialog", {
+      sessionId: activeSession.id,
+      remoteDir: activeSession.sftpPath,
+    }).catch((err: unknown) => pushToast("Upload failed", "error", String(err)));
   };
 
   const sftpCopyPathToTerminal = (entry: RemoteEntry) => {
     if (!activeSession) return;
-    void invoke("send_pty_input", {
-      sessionId: activeSession.id,
-      data: shellQuote(entry.path),
-    });
-    termRefs.current.get(activeSession.id)?.focus();
+    const quoted = shellQuote(entry.path);
+    termRefs.current.get(activeSession.id)?.pasteText(quoted);
   };
 
   const sftpCdInTerminal = (entry: RemoteEntry) => {
@@ -351,23 +448,44 @@ export function App() {
     termRefs.current.get(activeSession.id)?.focus();
   };
 
+  const saveActiveTranscript = () => {
+    if (!activeSession) return;
+    const term = termRefs.current.get(activeSession.id);
+    if (!term) return;
+    const content = term.copyAll();
+    void invoke<boolean>("save_transcript_dialog", {
+      defaultName: `${activeSession.title.replace(/[^A-Za-z0-9._-]/g, "_")}-output.log`,
+      content,
+    })
+      .then((saved) => {
+        if (saved) pushToast("Saved terminal transcript", "info");
+      })
+      .catch((err: unknown) => pushToast("Failed to save transcript", "error", String(err)));
+  };
+
   const activeTerm = activeSessionId ? termRefs.current.get(activeSessionId) ?? null : null;
 
   const startResizeSidebar = (e: React.MouseEvent) => {
     e.preventDefault();
+    resizeCleanupRef.current?.();
     const startX = e.clientX;
     const startW = sidebarWidth;
     const isRight = sidebarTab === "sftp" && settings.sftp_position === "right";
+    document.body.style.userSelect = "none";
+
     const onMove = (ev: MouseEvent) => {
       const delta = isRight ? startX - ev.clientX : ev.clientX - startX;
       setSidebarWidth(Math.max(220, Math.min(520, startW + delta)));
     };
-    const onUp = () => {
+    const cleanup = () => {
+      document.body.style.userSelect = "";
       window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
+      window.removeEventListener("mouseup", cleanup);
+      resizeCleanupRef.current = null;
     };
+    resizeCleanupRef.current = cleanup;
     window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
+    window.addEventListener("mouseup", cleanup);
   };
 
   const horizontalDock =
@@ -375,9 +493,18 @@ export function App() {
     sidebarTab === "sftp" &&
     (settings.sftp_position === "top" || settings.sftp_position === "bottom");
 
+  const sidebarBorderClass =
+    sidebarTab === "sftp" && settings.sftp_position === "right"
+      ? "border-l"
+      : sidebarTab === "sftp" && settings.sftp_position === "top"
+        ? "border-b"
+        : sidebarTab === "sftp" && settings.sftp_position === "bottom"
+          ? "border-t"
+          : "border-r";
+
   const sidebarEl = (
     <div
-      className="flex shrink-0 flex-col gap-2 border-r p-2.5"
+      className={`flex shrink-0 flex-col gap-2 ${sidebarBorderClass} p-2.5`}
       style={{
         width: horizontalDock ? "100%" : sidebarWidth,
         height: horizontalDock ? 230 : "100%",
@@ -456,18 +583,14 @@ export function App() {
               }
             }}
             onDownloadSelected={() => {
-              if (selectedEntry) void sftpDownloadEntry(selectedEntry);
+              if (selectedEntry) sftpDownloadEntry(selectedEntry);
             }}
-            onUploadPicker={() => void sftpUploadPicker()}
+            onUploadPicker={sftpUploadPicker}
             onNewFolder={() => setActiveModal({ kind: "new_folder" })}
             onNewFile={() => setActiveModal({ kind: "new_file" })}
             onDeleteSelected={() => {
-              if (activeSession && selectedEntry) {
-                void invoke("sftp_delete", {
-                  sessionId: activeSession.id,
-                  path: selectedEntry.path,
-                  isDir: selectedEntry.kind === "directory",
-                });
+              if (selectedEntry) {
+                setActiveModal({ kind: "delete_confirm", entry: selectedEntry });
               }
             }}
             onToggleHidden={() =>
@@ -524,13 +647,17 @@ export function App() {
               active={s.id === activeSessionId}
               settings={settings}
               theme={theme}
+              registerPtyWriter={registerPtyWriter}
+              drainBufferedPty={drainBufferedPty}
               onOsc7Path={(path) => {
-                if (settingsRef.current.follow_terminal_folder && path !== s.sftpPath) {
+                const live = sessionsRef.current.find((x) => x.id === s.id);
+                if (settingsRef.current.follow_terminal_folder && live && path !== live.sftpPath) {
                   void invoke("sftp_list_dir", { sessionId: s.id, path });
                 }
               }}
               onContextMenu={(x, y) => setContextMenu({ kind: "terminal", x, y })}
               onAutoCopied={() => pushToast("Copied selection", "info")}
+              onSaveTranscript={saveActiveTranscript}
             />
           ))
         )}
@@ -588,7 +715,6 @@ export function App() {
       />
 
       <div className="flex min-h-0 flex-1">
-        {/* Far-left vertical activity rail */}
         <div
           className="flex w-11 shrink-0 flex-col items-center gap-1.5 border-r py-2"
           style={{ backgroundColor: theme.bgBase, borderColor: theme.border }}
@@ -599,7 +725,6 @@ export function App() {
           {railBtn("settings", Settings, "Settings")}
         </div>
 
-        {/* Main workspace with dockable SFTP position */}
         {!sidebarOpen ? (
           terminalArea
         ) : sidebarTab === "sftp" && settings.sftp_position === "right" ? (
@@ -627,7 +752,6 @@ export function App() {
         )}
       </div>
 
-      {/* Minimal status bar (no Theme button) */}
       <div
         className="flex h-6 shrink-0 items-center border-t px-3 text-[11px]"
         style={{
@@ -653,18 +777,10 @@ export function App() {
         theme={theme}
         onClose={() => setContextMenu(null)}
         onOpenEntry={sftpOpenEntry}
-        onDownloadEntry={(e) => void sftpDownloadEntry(e)}
-        onUploadHere={() => void sftpUploadPicker()}
+        onDownloadEntry={sftpDownloadEntry}
+        onUploadHere={sftpUploadPicker}
         onRenameEntry={(entry) => setActiveModal({ kind: "rename", entry })}
-        onDeleteEntry={(entry) => {
-          if (activeSession) {
-            void invoke("sftp_delete", {
-              sessionId: activeSession.id,
-              path: entry.path,
-              isDir: entry.kind === "directory",
-            });
-          }
-        }}
+        onDeleteEntry={(entry) => setActiveModal({ kind: "delete_confirm", entry })}
         onCopyPath={(entry) => {
           const text = shellQuote(entry.path);
           void navigator.clipboard.writeText(text);
@@ -723,17 +839,7 @@ export function App() {
         onTermFontReset={() => persistSettings({ ...settings, terminal_font_size: 14 })}
         onTermClear={() => activeTerm?.clearScrollback()}
         onTermReset={() => activeTerm?.resetTerminal()}
-        onTermSaveFile={() => {
-          if (!activeSession || !activeTerm) return;
-          const content = activeTerm.copyAll();
-          void saveDialog({ defaultPath: `${activeSession.title}-output.log` }).then((path) => {
-            if (path) {
-              void invoke("save_text_file", { path, content })
-                .then(() => pushToast("Saved terminal transcript", "info"))
-                .catch((err: unknown) => pushToast("Failed to save file", "error", String(err)));
-            }
-          });
-        }}
+        onTermSaveFile={saveActiveTranscript}
         onTermCtrlC={() => {
           if (activeSession) {
             void invoke("send_pty_input", { sessionId: activeSession.id, data: "\x03" });
@@ -748,7 +854,7 @@ export function App() {
 
       <Modals
         modal={activeModal}
-        hostKeyPrompt={hostKeyPrompt}
+        hostKeyPrompt={hostKeyPrompts[0] ?? null}
         theme={theme}
         onCloseModal={() => setActiveModal(null)}
         onSubmitNewFolder={(name) => {
@@ -758,7 +864,7 @@ export function App() {
               sessionId: activeSession.id,
               parentDir: activeSession.sftpPath,
               name,
-            });
+            }).catch((err: unknown) => pushToast("Failed to create folder", "error", String(err)));
           }
         }}
         onSubmitNewFile={(name) => {
@@ -768,7 +874,7 @@ export function App() {
               sessionId: activeSession.id,
               parentDir: activeSession.sftpPath,
               name,
-            });
+            }).catch((err: unknown) => pushToast("Failed to create file", "error", String(err)));
           }
         }}
         onSubmitRename={(entry, newName) => {
@@ -778,7 +884,7 @@ export function App() {
               sessionId: activeSession.id,
               oldPath: entry.path,
               newName,
-            });
+            }).catch((err: unknown) => pushToast("Rename failed", "error", String(err)));
           }
         }}
         onSubmitChmod={(entry, mode) => {
@@ -788,11 +894,21 @@ export function App() {
               sessionId: activeSession.id,
               path: entry.path,
               mode,
-            });
+            }).catch((err: unknown) => pushToast("Chmod failed", "error", String(err)));
+          }
+        }}
+        onConfirmDelete={(entry) => {
+          setActiveModal(null);
+          setSelectedSftpPath(null);
+          if (activeSession) {
+            void invoke("sftp_delete", {
+              sessionId: activeSession.id,
+              path: entry.path,
+            }).catch((err: unknown) => pushToast("Delete failed", "error", String(err)));
           }
         }}
         onRespondHostKey={(promptId, accepted) => {
-          setHostKeyPrompt(null);
+          setHostKeyPrompts((prev) => prev.filter((p) => p.prompt_id !== promptId));
           void invoke("respond_host_key", { promptId, accepted });
         }}
       />

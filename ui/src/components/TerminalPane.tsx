@@ -1,6 +1,5 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import { WebLinksAddon } from "@xterm/addon-web-links";
@@ -24,18 +23,12 @@ interface TerminalPaneProps {
   active: boolean;
   settings: AppSettings;
   theme: ThemeTokens;
+  registerPtyWriter: (sessionId: string, writer: ((bytes: Uint8Array) => void) | null) => void;
+  drainBufferedPty: (sessionId: string) => Uint8Array[];
   onOsc7Path: (path: string) => void;
   onContextMenu: (x: number, y: number) => void;
   onAutoCopied: () => void;
-}
-
-function decodeBase64ToBytes(b64: string): Uint8Array {
-  const bin = atob(b64);
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) {
-    bytes[i] = bin.charCodeAt(i);
-  }
-  return bytes;
+  onSaveTranscript: () => void;
 }
 
 function mapCursorStyle(s: AppSettings["cursor_style"]): "bar" | "block" | "underline" {
@@ -44,17 +37,46 @@ function mapCursorStyle(s: AppSettings["cursor_style"]): "bar" | "block" | "unde
   return "bar";
 }
 
+function buildSafeFontFamily(fontName: string | null): string {
+  const fallback = 'ui-monospace, SFMono-Regular, Menlo, Consolas, "Cascadia Mono", monospace';
+  if (!fontName) return fallback;
+  const sanitized = fontName.replace(/[^A-Za-z0-9 _.-]/g, "").trim();
+  if (!sanitized) return fallback;
+  return `"${sanitized}", Consolas, "Cascadia Mono", monospace`;
+}
+
 export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
   function TerminalPane(
-    { sessionId, active, settings, theme, onOsc7Path, onContextMenu, onAutoCopied },
+    {
+      sessionId,
+      active,
+      settings,
+      theme,
+      registerPtyWriter,
+      drainBufferedPty,
+      onOsc7Path,
+      onContextMenu,
+      onAutoCopied,
+      onSaveTranscript,
+    },
     ref,
   ) {
     const containerRef = useRef<HTMLDivElement | null>(null);
     const termRef = useRef<Terminal | null>(null);
     const fitRef = useRef<FitAddon | null>(null);
     const searchRef = useRef<SearchAddon | null>(null);
+    const lastSizeRef = useRef<{ cols: number; rows: number }>({ cols: 0, rows: 0 });
+
     const settingsRef = useRef(settings);
     settingsRef.current = settings;
+    const activeRef = useRef(active);
+    activeRef.current = active;
+    const onOsc7Ref = useRef(onOsc7Path);
+    onOsc7Ref.current = onOsc7Path;
+    const onAutoCopiedRef = useRef(onAutoCopied);
+    onAutoCopiedRef.current = onAutoCopied;
+    const onSaveRef = useRef(onSaveTranscript);
+    onSaveRef.current = onSaveTranscript;
 
     const [findOpen, setFindOpen] = useState(false);
     const [findQuery, setFindQuery] = useState("");
@@ -75,47 +97,63 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
       return lines.join("\n");
     };
 
-    useImperativeHandle(ref, () => ({
-      copySelection: () => {
-        const sel = termRef.current?.getSelection() ?? "";
-        return sel.length > 0 ? sel : null;
-      },
-      copyAll: dumpBuffer,
-      pasteText: (text: string) => {
-        void invoke("send_pty_input", { sessionId, data: text });
-        termRef.current?.focus();
-      },
-      openFind: () => {
-        setFindOpen(true);
-        setTimeout(() => findInputRef.current?.focus(), 10);
-      },
-      clearScrollback: () => {
-        termRef.current?.clear();
-      },
-      resetTerminal: () => {
-        termRef.current?.reset();
-      },
-      focus: () => {
-        termRef.current?.focus();
-      },
-    }));
+    const fitAndSyncResize = () => {
+      const el = containerRef.current;
+      const fit = fitRef.current;
+      const term = termRef.current;
+      if (!el || !fit || !term || el.clientWidth <= 0 || el.clientHeight <= 0) return;
+      try {
+        fit.fit();
+        if (term.cols !== lastSizeRef.current.cols || term.rows !== lastSizeRef.current.rows) {
+          lastSizeRef.current = { cols: term.cols, rows: term.rows };
+          void invoke("resize_pty", { sessionId, cols: term.cols, rows: term.rows });
+        }
+      } catch {
+        // Ignore transient layout measurements.
+      }
+    };
+
+    useImperativeHandle(
+      ref,
+      () => ({
+        copySelection: () => {
+          const sel = termRef.current?.getSelection() ?? "";
+          return sel.length > 0 ? sel : null;
+        },
+        copyAll: dumpBuffer,
+        pasteText: (text: string) => {
+          // Route through xterm.paste() so bracketed paste mode protects against newline injection.
+          termRef.current?.paste(text);
+          termRef.current?.focus();
+        },
+        openFind: () => {
+          setFindOpen(true);
+          setTimeout(() => findInputRef.current?.focus(), 10);
+        },
+        clearScrollback: () => {
+          termRef.current?.clear();
+        },
+        resetTerminal: () => {
+          termRef.current?.reset();
+        },
+        focus: () => {
+          termRef.current?.focus();
+        },
+      }),
+      [sessionId],
+    );
 
     // Mount xterm.js + WebGL once per session.
     useEffect(() => {
       const el = containerRef.current;
       if (!el) return;
 
-      const fontFamily = settingsRef.current.terminal_font
-        ? `"${settingsRef.current.terminal_font}", Consolas, "Cascadia Mono", monospace`
-        : 'ui-monospace, SFMono-Regular, Menlo, Consolas, "Cascadia Mono", monospace';
-
       const term = new Terminal({
-        fontFamily,
+        fontFamily: buildSafeFontFamily(settingsRef.current.terminal_font),
         fontSize: settingsRef.current.terminal_font_size,
         cursorStyle: mapCursorStyle(settingsRef.current.cursor_style),
         cursorBlink: true,
         scrollback: settingsRef.current.scrollback_lines,
-        allowProposedApi: true,
         theme: {
           background: theme.termBg,
           foreground: theme.termFg,
@@ -127,7 +165,17 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
 
       const fitAddon = new FitAddon();
       const searchAddon = new SearchAddon();
-      const webLinksAddon = new WebLinksAddon();
+      // Safe external link opener: validates http/https and opens via OS browser, never window.open.
+      const webLinksAddon = new WebLinksAddon((_ev, uri) => {
+        try {
+          const parsed = new URL(uri);
+          if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+            void invoke("open_external_url", { url: parsed.toString() });
+          }
+        } catch {
+          // Ignore malformed URLs.
+        }
+      });
       term.loadAddon(fitAddon);
       term.loadAddon(searchAddon);
       term.loadAddon(webLinksAddon);
@@ -141,29 +189,46 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
         // Fallback to standard canvas/DOM renderer if WebGL is unavailable.
       }
 
-      fitAddon.fit();
-      void invoke("resize_pty", { sessionId, cols: term.cols, rows: term.rows });
-
       termRef.current = term;
       fitRef.current = fitAddon;
       searchRef.current = searchAddon;
+
+      // Drain any early PTY chunks buffered before TerminalPane mounted, then register live writer.
+      const buffered = drainBufferedPty(sessionId);
+      for (const chunk of buffered) {
+        term.write(chunk);
+      }
+      registerPtyWriter(sessionId, (bytes) => term.write(bytes));
+
+      fitAndSyncResize();
 
       // Forward user keystrokes to Rust russh PTY.
       const dataDisp = term.onData((data) => {
         void invoke("send_pty_input", { sessionId, data });
       });
 
-      // OSC 7 directory tracking -> sync SFTP sidebar.
+      // Validated + debounced OSC 7 directory tracking -> sync SFTP sidebar.
+      let oscTimer: number | null = null;
       const oscDisp = term.parser.registerOscHandler(7, (payload) => {
         if (payload.startsWith("file://")) {
           const rest = payload.slice("file://".length);
           const slashIdx = rest.indexOf("/");
           if (slashIdx >= 0) {
+            let decoded = rest.slice(slashIdx);
             try {
-              const decoded = decodeURIComponent(rest.slice(slashIdx));
-              onOsc7Path(decoded);
+              decoded = decodeURIComponent(decoded);
             } catch {
-              onOsc7Path(rest.slice(slashIdx));
+              // Use raw path if percent-decoding fails.
+            }
+            if (
+              decoded.startsWith("/") &&
+              decoded.length <= 4096 &&
+              !/[\x00-\x1f\x7f]/.test(decoded)
+            ) {
+              if (oscTimer !== null) window.clearTimeout(oscTimer);
+              oscTimer = window.setTimeout(() => {
+                onOsc7Ref.current(decoded);
+              }, 250);
             }
           }
         }
@@ -176,24 +241,27 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
         const sel = term.getSelection();
         if (sel) {
           void navigator.clipboard.writeText(sel);
-          onAutoCopied();
+          onAutoCopiedRef.current();
         }
       });
 
-      // Keyboard shortcuts inside xterm (Ctrl+Shift+C/V/F).
+      // Keyboard shortcuts inside xterm (Ctrl+Shift+C/V/F/S, Shift+Insert).
       term.attachCustomKeyEventHandler((ev) => {
         if (ev.type !== "keydown") return true;
         if (ev.ctrlKey && ev.shiftKey && ev.key.toLowerCase() === "c") {
           const sel = term.getSelection();
           if (sel) {
             void navigator.clipboard.writeText(sel);
-            onAutoCopied();
+            onAutoCopiedRef.current();
           }
           return false;
         }
-        if (ev.ctrlKey && ev.shiftKey && ev.key.toLowerCase() === "v") {
+        if (
+          (ev.ctrlKey && ev.shiftKey && ev.key.toLowerCase() === "v") ||
+          (ev.shiftKey && ev.key === "Insert")
+        ) {
           void navigator.clipboard.readText().then((txt) => {
-            if (txt) void invoke("send_pty_input", { sessionId, data: txt });
+            if (txt) term.paste(txt);
           });
           return false;
         }
@@ -202,60 +270,44 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
           setTimeout(() => findInputRef.current?.focus(), 10);
           return false;
         }
+        if (ev.ctrlKey && ev.shiftKey && ev.key.toLowerCase() === "s") {
+          onSaveRef.current();
+          return false;
+        }
         return true;
       });
 
-      // Subscribe to push PTY output from Rust (zero polling!).
-      let unlisten: (() => void) | null = null;
-      void listen<{ session_id: string; data_b64: string }>("vela://pty", (event) => {
-        if (event.payload.session_id === sessionId) {
-          term.write(decodeBase64ToBytes(event.payload.data_b64));
-        }
-      }).then((fn) => {
-        unlisten = fn;
-      });
-
-      // Auto-fit on container resize.
+      // Auto-fit on visible container resize only (never resize hidden background tabs).
       let resizeTimer: number | null = null;
       const observer = new ResizeObserver(() => {
+        if (!activeRef.current) return;
         if (resizeTimer !== null) window.clearTimeout(resizeTimer);
-        resizeTimer = window.setTimeout(() => {
-          if (!fitRef.current || !termRef.current) return;
-          try {
-            fitRef.current.fit();
-            void invoke("resize_pty", {
-              sessionId,
-              cols: termRef.current.cols,
-              rows: termRef.current.rows,
-            });
-          } catch {
-            // Ignore resize while hidden.
-          }
-        }, 30);
+        resizeTimer = window.setTimeout(fitAndSyncResize, 30);
       });
       observer.observe(el);
 
       return () => {
+        if (oscTimer !== null) window.clearTimeout(oscTimer);
         if (resizeTimer !== null) window.clearTimeout(resizeTimer);
+        registerPtyWriter(sessionId, null);
         observer.disconnect();
-        if (unlisten) unlisten();
         dataDisp.dispose();
         oscDisp.dispose();
         selDisp.dispose();
         term.dispose();
+        termRef.current = null;
+        fitRef.current = null;
+        searchRef.current = null;
       };
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [sessionId]);
 
-    // Live-update theme, font, font size, cursor style without restarting the terminal.
+    // Live-update theme, font, font size, cursor style, and re-fit when becoming active.
     useEffect(() => {
       const term = termRef.current;
-      const fit = fitRef.current;
       if (!term) return;
 
-      term.options.fontFamily = settings.terminal_font
-        ? `"${settings.terminal_font}", Consolas, "Cascadia Mono", monospace`
-        : 'ui-monospace, SFMono-Regular, Menlo, Consolas, "Cascadia Mono", monospace';
+      term.options.fontFamily = buildSafeFontFamily(settings.terminal_font);
       term.options.fontSize = settings.terminal_font_size;
       term.options.cursorStyle = mapCursorStyle(settings.cursor_style);
       term.options.scrollback = settings.scrollback_lines;
@@ -267,36 +319,15 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
         ...theme.ansi,
       };
 
-      if (fit && active) {
-        try {
-          fit.fit();
-          void invoke("resize_pty", { sessionId, cols: term.cols, rows: term.rows });
-        } catch {
-          // Ignore while transitioning.
-        }
+      if (active) {
+        const timer = window.setTimeout(() => {
+          fitAndSyncResize();
+          termRef.current?.focus();
+        }, 20);
+        return () => window.clearTimeout(timer);
       }
-    }, [settings, theme, active, sessionId]);
-
-    // Re-fit & focus when switching tabs.
-    useEffect(() => {
-      if (!active) return;
-      const timer = window.setTimeout(() => {
-        try {
-          fitRef.current?.fit();
-          if (termRef.current) {
-            void invoke("resize_pty", {
-              sessionId,
-              cols: termRef.current.cols,
-              rows: termRef.current.rows,
-            });
-            termRef.current.focus();
-          }
-        } catch {
-          // Ignore.
-        }
-      }, 20);
-      return () => window.clearTimeout(timer);
-    }, [active, sessionId]);
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [settings, theme, active]);
 
     return (
       <div
@@ -306,7 +337,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
           e.preventDefault();
           if (settings.right_click_paste) {
             void navigator.clipboard.readText().then((txt) => {
-              if (txt) void invoke("send_pty_input", { sessionId, data: txt });
+              if (txt) termRef.current?.paste(txt);
             });
             return;
           }

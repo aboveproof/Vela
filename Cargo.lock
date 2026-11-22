@@ -5829,6 +5829,7 @@ name = "vela"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "open",
  "serde",
  "serde_json",
  "tauri",
@@ -5870,6 +5871,7 @@ dependencies = [
  "russh",
  "russh-sftp",
  "serde",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
  "tracing",

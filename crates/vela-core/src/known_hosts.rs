@@ -47,11 +47,21 @@ impl KnownHostsStore {
         &self.path
     }
 
-    fn host_entry_key(host: &str, port: u16) -> String {
+    fn host_entry_key(host: &str, port: u16) -> VelaResult<String> {
+        let trimmed = host.trim();
+        if trimmed.is_empty()
+            || trimmed.starts_with('#')
+            || trimmed
+                .chars()
+                .any(|c| c.is_whitespace() || c.is_control() || c == '#')
+        {
+            return Err(VelaError::Config(format!("invalid SSH host name: '{host}'")));
+        }
+        let lower = trimmed.to_lowercase();
         if port == 22 {
-            host.to_lowercase()
+            Ok(lower)
         } else {
-            format!("[{}]:{port}", host.to_lowercase())
+            Ok(format!("[{lower}]:{port}"))
         }
     }
 
@@ -85,15 +95,26 @@ impl KnownHostsStore {
             out.push_str(fp);
             out.push('\n');
         }
-        let tmp = self.path.with_extension("tmp");
-        std::fs::write(&tmp, out)?;
+        let tmp_name = format!(".known_hosts.{}.tmp", uuid::Uuid::new_v4());
+        let tmp = self.path.with_file_name(tmp_name);
+        {
+            use std::io::Write;
+            let mut file = std::fs::File::create(&tmp)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
+            }
+            file.write_all(out.as_bytes())?;
+            file.sync_all()?;
+        }
         std::fs::rename(&tmp, &self.path)?;
         Ok(())
     }
 
     pub fn verify(&self, host: &str, port: u16, fingerprint: &str) -> VelaResult<HostKeyStatus> {
         let entries = self.read_entries()?;
-        let key = Self::host_entry_key(host, port);
+        let key = Self::host_entry_key(host, port)?;
         match entries.get(&key) {
             None => Ok(HostKeyStatus::Unknown {
                 fingerprint: fingerprint.to_string(),
@@ -107,8 +128,11 @@ impl KnownHostsStore {
     }
 
     pub fn trust(&self, host: &str, port: u16, fingerprint: &str) -> VelaResult<()> {
+        if fingerprint.chars().any(|c| c.is_whitespace() || c.is_control()) {
+            return Err(VelaError::Config("invalid host fingerprint".into()));
+        }
         let mut entries = self.read_entries()?;
-        entries.insert(Self::host_entry_key(host, port), fingerprint.to_string());
+        entries.insert(Self::host_entry_key(host, port)?, fingerprint.to_string());
         self.write_entries(&entries)
     }
 }

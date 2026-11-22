@@ -18,6 +18,9 @@ fn main() {
         }
     };
 
+    // Prune any stale temp files left by a previous crash.
+    vela_ssh::cleanup_stale_edit_dirs();
+
     let result = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::new())
@@ -33,16 +36,19 @@ fn main() {
             commands::resize_pty,
             commands::disconnect_session,
             commands::sftp_list_dir,
+            commands::sftp_open_entry,
             commands::sftp_go_up,
-            commands::sftp_download,
-            commands::sftp_upload,
+            commands::sftp_download_dialog,
+            commands::sftp_upload_dialog,
+            commands::sftp_upload_dropped,
             commands::sftp_mkdir,
             commands::sftp_create_file,
             commands::sftp_rename,
             commands::sftp_delete,
             commands::sftp_chmod,
             commands::sftp_edit_locally,
-            commands::save_text_file,
+            commands::save_transcript_dialog,
+            commands::open_external_url,
         ])
         .run(tauri::generate_context!());
 

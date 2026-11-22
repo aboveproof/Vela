@@ -106,7 +106,7 @@ impl ProfileStore {
         Ok(doc.profiles)
     }
 
-    /// Writes profiles atomically via a sibling temporary file to prevent corruption.
+    /// Writes profiles atomically via a unique sibling temporary file and fsync.
     pub fn save(&self, profiles: &[HostProfile]) -> VelaResult<()> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -117,8 +117,19 @@ impl ProfileStore {
         let serialized = toml::to_string_pretty(&doc)
             .map_err(|err| VelaError::Config(format!("failed to serialize profiles: {err}")))?;
 
-        let tmp_path = self.path.with_extension("toml.tmp");
-        std::fs::write(&tmp_path, serialized)?;
+        let tmp_name = format!(".hosts.{}.tmp", Uuid::new_v4());
+        let tmp_path = self.path.with_file_name(tmp_name);
+        {
+            use std::io::Write;
+            let mut file = std::fs::File::create(&tmp_path)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
+            }
+            file.write_all(serialized.as_bytes())?;
+            file.sync_all()?;
+        }
         std::fs::rename(&tmp_path, &self.path)?;
         Ok(())
     }

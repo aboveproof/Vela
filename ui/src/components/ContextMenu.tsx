@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   Check,
   Copy,
@@ -57,6 +57,8 @@ interface ContextMenuProps {
 
 export function ContextMenu(props: ContextMenuProps) {
   const { menu, theme, onClose } = props;
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  const [pos, setPos] = useState({ left: 0, top: 0 });
 
   useEffect(() => {
     if (!menu) return;
@@ -67,12 +69,18 @@ export function ContextMenu(props: ContextMenuProps) {
     return () => window.removeEventListener("keydown", onKey);
   }, [menu, onClose]);
 
-  if (!menu) return null;
+  useLayoutEffect(() => {
+    if (!menu) return;
+    const el = menuRef.current;
+    const w = el?.offsetWidth ?? 240;
+    const h = el?.offsetHeight ?? 360;
+    setPos({
+      left: Math.max(8, Math.min(menu.x, window.innerWidth - w - 8)),
+      top: Math.max(8, Math.min(menu.y, window.innerHeight - h - 8)),
+    });
+  }, [menu]);
 
-  const menuW = 240;
-  const menuH = menu.kind === "terminal" ? 390 : 340;
-  const left = Math.max(6, Math.min(menu.x, window.innerWidth - menuW - 8));
-  const top = Math.max(6, Math.min(menu.y, window.innerHeight - menuH - 8));
+  if (!menu) return null;
 
   const itemCls =
     "flex w-full items-center gap-2.5 rounded-md px-2.5 py-1.5 text-left text-xs transition-colors hover:bg-white/8";
@@ -88,11 +96,13 @@ export function ContextMenu(props: ContextMenuProps) {
       }}
     >
       <div
-        className="fixed rounded-xl border p-1.5 shadow-2xl"
+        ref={menuRef}
+        className="fixed overflow-y-auto rounded-xl border p-1.5 shadow-2xl"
         style={{
-          left,
-          top,
-          width: menuW,
+          left: pos.left,
+          top: pos.top,
+          width: 244,
+          maxHeight: "calc(100vh - 16px)",
           backgroundColor: theme.bgElevated,
           borderColor: theme.border,
           color: theme.textPrimary,

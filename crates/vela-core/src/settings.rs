@@ -128,8 +128,19 @@ impl SettingsStore {
         }
         let serialized = toml::to_string_pretty(settings)
             .map_err(|err| VelaError::Config(format!("failed to serialize settings: {err}")))?;
-        let tmp = self.path.with_extension("toml.tmp");
-        std::fs::write(&tmp, serialized)?;
+        let tmp_name = format!(".settings.{}.tmp", uuid::Uuid::new_v4());
+        let tmp = self.path.with_file_name(tmp_name);
+        {
+            use std::io::Write;
+            let mut file = std::fs::File::create(&tmp)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
+            }
+            file.write_all(serialized.as_bytes())?;
+            file.sync_all()?;
+        }
         std::fs::rename(&tmp, &self.path)?;
         Ok(())
     }

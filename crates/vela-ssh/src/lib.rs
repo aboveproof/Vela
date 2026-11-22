@@ -4,7 +4,7 @@ pub mod telemetry;
 
 pub use session::{
     AuthCredentials, ConnectConfig, HostKeyPrompt, PtySize, SessionCommand, SessionEvent,
-    SshSessionHandle, connect_session,
+    SshSessionHandle, cleanup_stale_edit_dirs, connect_session,
 };
 pub use sftp::{RemoteEntry, RemoteEntryKind};
 pub use telemetry::{DiskUsage, ServerStats};

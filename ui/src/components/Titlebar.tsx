@@ -1,5 +1,6 @@
+import { useEffect, useMemo, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Minus, PanelLeft, Plus, Square, X } from "lucide-react";
+import { Copy, Minus, PanelLeft, Plus, Square, X } from "lucide-react";
 import type { SessionTab, ThemeTokens } from "../types";
 
 interface TitlebarProps {
@@ -21,7 +22,30 @@ export function Titlebar({
   onCloseTab,
   onNewTab,
 }: TitlebarProps) {
-  const appWindow = getCurrentWindow();
+  const appWindow = useMemo(() => getCurrentWindow(), []);
+  const [isMaximized, setIsMaximized] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | null = null;
+
+    const sync = () => {
+      void appWindow.isMaximized().then((m) => {
+        if (!cancelled) setIsMaximized(m);
+      });
+    };
+    sync();
+
+    void appWindow.onResized(() => sync()).then((fn) => {
+      if (cancelled) fn();
+      else unlisten = fn;
+    });
+
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  }, [appWindow]);
 
   return (
     <div
@@ -32,7 +56,7 @@ export function Titlebar({
         borderColor: theme.border,
       }}
     >
-      <div className="flex min-w-0 flex-1 items-center gap-1.5">
+      <div data-tauri-drag-region className="flex min-w-0 flex-1 items-center gap-1.5">
         <button
           onClick={onToggleSidebar}
           title="Toggle Sidebar (Ctrl+B)"
@@ -92,9 +116,9 @@ export function Titlebar({
             <Plus className="h-3.5 w-3.5" />
           </button>
         </div>
-      </div>
 
-      <div data-tauri-drag-region className="h-full min-w-[40px] flex-1" />
+        <div data-tauri-drag-region className="h-8 min-w-[32px] flex-1" />
+      </div>
 
       <div className="flex items-center gap-0.5">
         <button
@@ -109,9 +133,9 @@ export function Titlebar({
           onClick={() => void appWindow.toggleMaximize()}
           className="flex h-7 w-8 items-center justify-center rounded-md transition-colors hover:bg-white/8"
           style={{ color: theme.textMuted }}
-          title="Maximize"
+          title={isMaximized ? "Restore" : "Maximize"}
         >
-          <Square className="h-3 w-3" />
+          {isMaximized ? <Copy className="h-3 w-3" /> : <Square className="h-3 w-3" />}
         </button>
         <button
           onClick={() => void appWindow.close()}

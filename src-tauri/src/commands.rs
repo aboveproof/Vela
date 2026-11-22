@@ -1,10 +1,12 @@
 use std::collections::HashMap;
+use std::fmt;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_dialog::DialogExt;
 use tokio::sync::oneshot;
 use tracing::{error, info, warn};
 use uuid::Uuid;
@@ -12,15 +14,21 @@ use vela_core::{
     AppSettings, AuthMethod, HostKeyStatus, HostProfile, KnownHostsStore, OsKeyringStore,
     ProfileStore, SecretStore, SettingsStore, UserError,
 };
-use vela_ssh::sftp::{join_remote_path, parent_remote_path};
+use vela_ssh::sftp::{join_remote_path, parent_remote_path, validate_remote_entry_name};
 use vela_ssh::{
     AuthCredentials, ConnectConfig, PtySize, RemoteEntry, ServerStats, SessionCommand,
     SessionEvent, SshSessionHandle, connect_session,
 };
 
+pub struct PendingPrompt {
+    pub session_id: String,
+    pub responder: oneshot::Sender<bool>,
+}
+
 pub struct AppState {
     pub sessions: Mutex<HashMap<String, SshSessionHandle>>,
-    pub host_key_prompts: Mutex<HashMap<String, oneshot::Sender<bool>>>,
+    pub host_key_prompts: Mutex<HashMap<String, PendingPrompt>>,
+    pub store_lock: Mutex<()>,
     pub profile_store: Option<ProfileStore>,
     pub settings_store: Option<SettingsStore>,
     pub known_hosts: Option<KnownHostsStore>,
@@ -32,6 +40,7 @@ impl AppState {
         Self {
             sessions: Mutex::new(HashMap::new()),
             host_key_prompts: Mutex::new(HashMap::new()),
+            store_lock: Mutex::new(()),
             profile_store: ProfileStore::default_store().ok(),
             settings_store: SettingsStore::default_store().ok(),
             known_hosts: KnownHostsStore::default_store().ok(),
@@ -39,7 +48,7 @@ impl AppState {
         }
     }
 
-    fn send_cmd(&self, session_id: &str, cmd: SessionCommand) -> Result<(), String> {
+    async fn send_cmd(&self, session_id: &str, cmd: SessionCommand) -> Result<(), String> {
         let tx = {
             let guard = self
                 .sessions
@@ -50,8 +59,15 @@ impl AppState {
                 .map(|h| h.cmd_tx.clone())
                 .ok_or_else(|| "session not found".to_string())?
         };
-        tx.try_send(cmd)
+        tx.send(cmd)
+            .await
             .map_err(|e| format!("failed to send session command: {e}"))
+    }
+
+    pub fn purge_prompts_for_session(&self, session_id: &str) {
+        if let Ok(mut guard) = self.host_key_prompts.lock() {
+            guard.retain(|_, p| p.session_id != session_id);
+        }
     }
 }
 
@@ -103,7 +119,7 @@ pub struct ErrorPayload {
     pub error: UserError,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct NewProfileInput {
     pub name: String,
     pub host: String,
@@ -115,11 +131,39 @@ pub struct NewProfileInput {
     pub passphrase: Option<String>,
 }
 
+impl fmt::Debug for NewProfileInput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NewProfileInput")
+            .field("name", &self.name)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("username", &self.username)
+            .field("use_key", &self.use_key)
+            .field("password", &self.password.as_ref().map(|_| "[REDACTED]"))
+            .field("key_path", &self.key_path)
+            .field("passphrase", &self.passphrase.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct ConnectResult {
     pub session_id: String,
     pub title: String,
     pub address: String,
+}
+
+fn validate_host_name(host: &str) -> Result<String, String> {
+    let trimmed = host.trim();
+    if trimmed.is_empty()
+        || trimmed.starts_with('#')
+        || trimmed
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || c == '#')
+    {
+        return Err("Host contains invalid characters".to_string());
+    }
+    Ok(trimmed.to_string())
 }
 
 #[tauri::command]
@@ -135,10 +179,13 @@ pub fn save_profile(
     input: NewProfileInput,
     state: State<'_, AppState>,
 ) -> Result<HostProfile, String> {
-    let host = input.host.trim().to_string();
+    let host = validate_host_name(&input.host)?;
     let username = input.username.trim().to_string();
-    if host.is_empty() || username.is_empty() {
-        return Err("Host and username are required".to_string());
+    if username.is_empty() {
+        return Err("Username is required".to_string());
+    }
+    if input.port == 0 {
+        return Err("Port must be between 1 and 65535".to_string());
     }
 
     let name = if input.name.trim().is_empty() {
@@ -148,8 +195,13 @@ pub fn save_profile(
     };
 
     let auth = if input.use_key {
+        let kp = input.key_path.unwrap_or_default();
+        let trimmed = kp.trim();
+        if trimmed.is_empty() {
+            return Err("Private key path is required for SSH key auth".to_string());
+        }
         AuthMethod::PrivateKey {
-            path: PathBuf::from(input.key_path.unwrap_or_default().trim()),
+            path: PathBuf::from(trimmed),
         }
     } else {
         AuthMethod::Password
@@ -162,14 +214,19 @@ pub fn save_profile(
     } else {
         input.password.unwrap_or_default()
     };
-    if !secret.is_empty()
-        && let Err(err) = state.secrets.set_secret(&profile.secret_key(), &secret)
-    {
-        warn!("could not save secret to OS keychain: {err}");
+    if !secret.is_empty() {
+        state
+            .secrets
+            .set_secret(&profile.secret_key(), &secret)
+            .map_err(|e| format!("Failed to store credentials in OS keychain: {e}"))?;
     }
 
     if let Some(store) = &state.profile_store {
-        let mut profiles = store.load().unwrap_or_default();
+        let _lock = state
+            .store_lock
+            .lock()
+            .map_err(|e| format!("store lock poisoned: {e}"))?;
+        let mut profiles = store.load().map_err(|e| e.to_string())?;
         profiles.push(profile.clone());
         store.save(&profiles).map_err(|e| e.to_string())?;
     }
@@ -183,10 +240,16 @@ pub fn delete_profile(profile_id: String, state: State<'_, AppState>) -> Result<
     let Some(store) = &state.profile_store else {
         return Ok(());
     };
-    let mut profiles = store.load().unwrap_or_default();
+    let _lock = state
+        .store_lock
+        .lock()
+        .map_err(|e| format!("store lock poisoned: {e}"))?;
+    let mut profiles = store.load().map_err(|e| e.to_string())?;
     if let Some(pos) = profiles.iter().position(|p| p.id == uuid) {
         let removed = profiles.remove(pos);
-        let _ = state.secrets.delete_secret(&removed.secret_key());
+        if let Err(err) = state.secrets.delete_secret(&removed.secret_key()) {
+            warn!("failed to remove secret from OS keychain: {err}");
+        }
         store.save(&profiles).map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -202,11 +265,17 @@ pub fn get_settings(state: State<'_, AppState>) -> AppSettings {
 }
 
 #[tauri::command]
-pub fn save_settings(settings: AppSettings, state: State<'_, AppState>) -> Result<(), String> {
+pub async fn save_settings(
+    settings: AppSettings,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
     if let Some(store) = &state.settings_store {
+        let _lock = state
+            .store_lock
+            .lock()
+            .map_err(|e| format!("store lock poisoned: {e}"))?;
         store.save(&settings).map_err(|e| e.to_string())?;
     }
-    // Propagate monitoring toggle to all live sessions.
     let handles: Vec<_> = {
         let guard = state
             .sessions
@@ -215,19 +284,25 @@ pub fn save_settings(settings: AppSettings, state: State<'_, AppState>) -> Resul
         guard.values().map(|h| h.cmd_tx.clone()).collect()
     };
     for tx in handles {
-        let _ = tx.try_send(SessionCommand::SetMonitoring(settings.remote_monitoring));
+        let _ = tx
+            .send(SessionCommand::SetMonitoring(settings.remote_monitoring))
+            .await;
     }
     Ok(())
 }
 
 #[tauri::command]
 pub async fn connect_profile(
+    session_id: String,
     profile_id: String,
     cols: u32,
     rows: u32,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<ConnectResult, String> {
+    if session_id.trim().is_empty() {
+        return Err("session_id is required".to_string());
+    }
     let uuid = Uuid::parse_str(&profile_id).map_err(|e| e.to_string())?;
     let store = state
         .profile_store
@@ -242,17 +317,17 @@ pub async fn connect_profile(
     let saved_secret = state
         .secrets
         .get_secret(&profile.secret_key())
-        .ok()
-        .flatten();
+        .map_err(|e| format!("OS keychain error: {e}"))?;
 
     let credentials = match &profile.auth {
-        AuthMethod::Password | AuthMethod::Agent => {
-            AuthCredentials::Password(saved_secret.unwrap_or_default())
-        }
+        AuthMethod::Password => AuthCredentials::Password(saved_secret.unwrap_or_default()),
         AuthMethod::PrivateKey { path } => AuthCredentials::PrivateKey {
             path: path.clone(),
             passphrase: saved_secret,
         },
+        AuthMethod::Agent => {
+            return Err("SSH agent authentication is not yet implemented".to_string());
+        }
     };
 
     let known_hosts = state
@@ -282,10 +357,9 @@ pub async fn connect_profile(
     info!("Connecting Tauri session to {}", profile.display_address());
     let (handle, mut event_rx) = connect_session(cfg, known_hosts);
     if !settings.remote_monitoring {
-        let _ = handle.cmd_tx.try_send(SessionCommand::SetMonitoring(false));
+        let _ = handle.cmd_tx.send(SessionCommand::SetMonitoring(false)).await;
     }
 
-    let session_id = Uuid::new_v4().to_string();
     {
         let mut guard = state
             .sessions
@@ -302,7 +376,13 @@ pub async fn connect_profile(
                 SessionEvent::HostKeyVerification(prompt) => {
                     let prompt_id = Uuid::new_v4().to_string();
                     if let Ok(mut guard) = app_handle.state::<AppState>().host_key_prompts.lock() {
-                        guard.insert(prompt_id.clone(), prompt.responder);
+                        guard.insert(
+                            prompt_id.clone(),
+                            PendingPrompt {
+                                session_id: sid.clone(),
+                                responder: prompt.responder,
+                            },
+                        );
                     }
                     let _ = app_handle.emit(
                         "vela://host-key",
@@ -387,7 +467,9 @@ pub async fn connect_profile(
                 }
             }
         }
-        if let Ok(mut guard) = app_handle.state::<AppState>().sessions.lock() {
+        let app_state = app_handle.state::<AppState>();
+        app_state.purge_prompts_for_session(&sid);
+        if let Ok(mut guard) = app_state.sessions.lock() {
             guard.remove(&sid);
         }
     });
@@ -405,46 +487,54 @@ pub fn respond_host_key(
     accepted: bool,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let tx = {
+    let prompt = {
         let mut guard = state
             .host_key_prompts
             .lock()
             .map_err(|e| format!("prompt lock poisoned: {e}"))?;
         guard.remove(&prompt_id)
     };
-    if let Some(sender) = tx {
-        let _ = sender.send(accepted);
+    if let Some(p) = prompt {
+        let _ = p.responder.send(accepted);
     }
     Ok(())
 }
 
 #[tauri::command]
-pub fn send_pty_input(
+pub async fn send_pty_input(
     session_id: String,
     data: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    state.send_cmd(&session_id, SessionCommand::SendBytes(data.into_bytes()))
+    state
+        .send_cmd(&session_id, SessionCommand::SendBytes(data.into_bytes()))
+        .await
 }
 
 #[tauri::command]
-pub fn resize_pty(
+pub async fn resize_pty(
     session_id: String,
     cols: u32,
     rows: u32,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    state.send_cmd(
-        &session_id,
-        SessionCommand::Resize(PtySize {
-            cols: cols.max(10),
-            rows: rows.max(4),
-        }),
-    )
+    state
+        .send_cmd(
+            &session_id,
+            SessionCommand::Resize(PtySize {
+                cols: cols.max(10),
+                rows: rows.max(4),
+            }),
+        )
+        .await
 }
 
 #[tauri::command]
-pub fn disconnect_session(session_id: String, state: State<'_, AppState>) -> Result<(), String> {
+pub async fn disconnect_session(
+    session_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.purge_prompts_for_session(&session_id);
     let handle = {
         let mut guard = state
             .sessions
@@ -453,48 +543,125 @@ pub fn disconnect_session(session_id: String, state: State<'_, AppState>) -> Res
         guard.remove(&session_id)
     };
     if let Some(h) = handle {
-        let _ = h.cmd_tx.try_send(SessionCommand::Disconnect);
+        let _ = h.cmd_tx.send(SessionCommand::Disconnect).await;
     }
     Ok(())
 }
 
 #[tauri::command]
-pub fn sftp_list_dir(
+pub async fn sftp_list_dir(
     session_id: String,
     path: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    state.send_cmd(&session_id, SessionCommand::SftpListDir(path))
+    state
+        .send_cmd(&session_id, SessionCommand::SftpListDir(path))
+        .await
 }
 
 #[tauri::command]
-pub fn sftp_go_up(
+pub async fn sftp_open_entry(
+    session_id: String,
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state
+        .send_cmd(&session_id, SessionCommand::SftpOpenEntry(path))
+        .await
+}
+
+#[tauri::command]
+pub async fn sftp_go_up(
     session_id: String,
     current_path: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let parent = parent_remote_path(&current_path);
-    state.send_cmd(&session_id, SessionCommand::SftpListDir(parent))
+    state
+        .send_cmd(&session_id, SessionCommand::SftpListDir(parent))
+        .await
 }
 
+/// Opens a native OS Save dialog on the backend so the frontend cannot supply arbitrary local paths.
 #[tauri::command]
-pub fn sftp_download(
+pub async fn sftp_download_dialog(
     session_id: String,
     remote_path: String,
-    local_path: String,
+    default_name: String,
+    app: AppHandle,
     state: State<'_, AppState>,
-) -> Result<(), String> {
-    state.send_cmd(
-        &session_id,
-        SessionCommand::SftpDownload {
-            remote_path,
-            local_path: PathBuf::from(local_path),
-        },
-    )
+) -> Result<bool, String> {
+    let (tx, rx) = oneshot::channel();
+    app.dialog()
+        .file()
+        .set_file_name(&default_name)
+        .save_file(move |picked| {
+            let _ = tx.send(picked);
+        });
+
+    let Some(file_path) = rx.await.ok().flatten() else {
+        return Ok(false);
+    };
+    let local_path = file_path
+        .into_path()
+        .map_err(|e| format!("invalid save path: {e}"))?;
+
+    state
+        .send_cmd(
+            &session_id,
+            SessionCommand::SftpDownload {
+                remote_path,
+                local_path,
+            },
+        )
+        .await?;
+    Ok(true)
 }
 
+/// Opens a native OS Open dialog on the backend to pick files for SFTP upload.
 #[tauri::command]
-pub fn sftp_upload(
+pub async fn sftp_upload_dialog(
+    session_id: String,
+    remote_dir: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<usize, String> {
+    let (tx, rx) = oneshot::channel();
+    app.dialog().file().pick_files(move |picked| {
+        let _ = tx.send(picked);
+    });
+
+    let Some(files) = rx.await.ok().flatten() else {
+        return Ok(0);
+    };
+
+    let mut count = 0usize;
+    for fp in files {
+        let local_path = fp
+            .into_path()
+            .map_err(|e| format!("invalid file path: {e}"))?;
+        let Some(file_name) = local_path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let valid_name = validate_remote_entry_name(file_name).map_err(|e| e.to_string())?;
+        let remote_path = join_remote_path(&remote_dir, valid_name);
+        state
+            .send_cmd(
+                &session_id,
+                SessionCommand::SftpUpload {
+                    local_path,
+                    remote_path,
+                },
+            )
+            .await?;
+        count += 1;
+    }
+    Ok(count)
+}
+
+/// Uploads OS-dropped local files or folders into `remote_dir`.
+#[tauri::command]
+pub async fn sftp_upload_dropped(
     session_id: String,
     local_path: String,
     remote_dir: String,
@@ -505,83 +672,135 @@ pub fn sftp_upload(
         .file_name()
         .and_then(|n| n.to_str())
         .ok_or_else(|| "invalid local filename".to_string())?;
-    let remote_path = join_remote_path(&remote_dir, file_name);
-    state.send_cmd(
-        &session_id,
-        SessionCommand::SftpUpload {
-            local_path: local,
-            remote_path,
-        },
-    )
+    let valid_name = validate_remote_entry_name(file_name).map_err(|e| e.to_string())?;
+    let remote_path = join_remote_path(&remote_dir, valid_name);
+    state
+        .send_cmd(
+            &session_id,
+            SessionCommand::SftpUpload {
+                local_path: local,
+                remote_path,
+            },
+        )
+        .await
 }
 
 #[tauri::command]
-pub fn sftp_mkdir(
+pub async fn sftp_mkdir(
     session_id: String,
     parent_dir: String,
     name: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let path = join_remote_path(&parent_dir, name.trim());
-    state.send_cmd(&session_id, SessionCommand::SftpMkdir { path })
+    let valid = validate_remote_entry_name(&name).map_err(|e| e.to_string())?;
+    let path = join_remote_path(&parent_dir, valid);
+    state
+        .send_cmd(&session_id, SessionCommand::SftpMkdir { path })
+        .await
 }
 
 #[tauri::command]
-pub fn sftp_create_file(
+pub async fn sftp_create_file(
     session_id: String,
     parent_dir: String,
     name: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let path = join_remote_path(&parent_dir, name.trim());
-    state.send_cmd(&session_id, SessionCommand::SftpCreateFile { path })
+    let valid = validate_remote_entry_name(&name).map_err(|e| e.to_string())?;
+    let path = join_remote_path(&parent_dir, valid);
+    state
+        .send_cmd(&session_id, SessionCommand::SftpCreateFile { path })
+        .await
 }
 
 #[tauri::command]
-pub fn sftp_rename(
+pub async fn sftp_rename(
     session_id: String,
     old_path: String,
     new_name: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
+    let valid = validate_remote_entry_name(&new_name).map_err(|e| e.to_string())?;
     let parent = parent_remote_path(&old_path);
-    let new_path = join_remote_path(&parent, new_name.trim());
-    state.send_cmd(&session_id, SessionCommand::SftpRename { old_path, new_path })
+    let new_path = join_remote_path(&parent, valid);
+    state
+        .send_cmd(&session_id, SessionCommand::SftpRename { old_path, new_path })
+        .await
 }
 
 #[tauri::command]
-pub fn sftp_delete(
+pub async fn sftp_delete(
     session_id: String,
     path: String,
-    is_dir: bool,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    state.send_cmd(&session_id, SessionCommand::SftpDelete { path, is_dir })
+    state
+        .send_cmd(&session_id, SessionCommand::SftpDelete { path })
+        .await
 }
 
 #[tauri::command]
-pub fn sftp_chmod(
+pub async fn sftp_chmod(
     session_id: String,
     path: String,
     mode: u32,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    state.send_cmd(&session_id, SessionCommand::SftpChmod { path, mode })
+    state
+        .send_cmd(
+            &session_id,
+            SessionCommand::SftpChmod {
+                path,
+                mode: mode & 0o7777,
+            },
+        )
+        .await
 }
 
 #[tauri::command]
-pub fn sftp_edit_locally(
+pub async fn sftp_edit_locally(
     session_id: String,
     remote_path: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    state.send_cmd(
-        &session_id,
-        SessionCommand::SftpEditLocally { remote_path },
-    )
+    state
+        .send_cmd(&session_id, SessionCommand::SftpEditLocally { remote_path })
+        .await
 }
 
+/// Opens a native Save dialog on the backend and writes a terminal transcript safely.
 #[tauri::command]
-pub fn save_text_file(path: String, content: String) -> Result<(), String> {
-    std::fs::write(&path, content).map_err(|e| e.to_string())
+pub async fn save_transcript_dialog(
+    default_name: String,
+    content: String,
+    app: AppHandle,
+) -> Result<bool, String> {
+    let (tx, rx) = oneshot::channel();
+    app.dialog()
+        .file()
+        .set_file_name(&default_name)
+        .save_file(move |picked| {
+            let _ = tx.send(picked);
+        });
+
+    let Some(file_path) = rx.await.ok().flatten() else {
+        return Ok(false);
+    };
+    let local_path = file_path
+        .into_path()
+        .map_err(|e| format!("invalid save path: {e}"))?;
+    tokio::fs::write(&local_path, content)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
+/// Opens an external HTTP/HTTPS URL in the user's OS browser (rejecting all other schemes).
+#[tauri::command]
+pub fn open_external_url(url: String) -> Result<(), String> {
+    let trimmed = url.trim();
+    if !(trimmed.starts_with("https://") || trimmed.starts_with("http://")) {
+        return Err("Only http:// and https:// URLs can be opened".to_string());
+    }
+    open::that(trimmed).map_err(|e| e.to_string())
 }
