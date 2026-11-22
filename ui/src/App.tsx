@@ -768,6 +768,7 @@ export function App() {
   const startResizeSidebar = (e: React.PointerEvent) => {
     if (e.button !== 0) return;
     e.preventDefault();
+    e.currentTarget.setPointerCapture(e.pointerId);
     resizeCleanupRef.current?.();
     const startX = e.clientX;
     const startY = e.clientY;
