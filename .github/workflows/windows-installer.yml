@@ -1,0 +1,43 @@
+name: Windows installer
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+      - name: Build frontend
+        run: |
+          npm ci --prefix ui
+          npm run build --prefix ui
+      - uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          args: --bundles nsis
+          tagName: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
+          releaseName: Vela ${{ github.ref_name }}
+          releaseBody: Download the Windows setup executable below.
+          releaseDraft: false
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vela-windows-setup
+          path: target/release/bundle/nsis/*-setup.exe
+          if-no-files-found: error

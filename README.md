@@ -114,6 +114,14 @@ cd ..
 cargo run --release -p vela
 ```
 
+### Windows installer
+
+GitHub Actions builds an NSIS setup `.exe` on each push to `main`. Open the latest **Windows installer** run under [Actions](https://github.com/aboveproof/Vela/actions/workflows/windows-installer.yml) and download its `vela-windows-setup` artifact to test it. GitHub requires a sign-in to download workflow artifacts.
+
+For a public download, update the version in `src-tauri/tauri.conf.json` and the workspace version in `Cargo.toml`, then push a matching `vX.Y.Z` tag. The workflow publishes the setup executable under [Releases](https://github.com/aboveproof/Vela/releases). Keep the tag and app version in sync; do not reuse a release tag for a different build.
+
+The installer includes WebView2 setup for machines without it, so installation does not require a separate runtime download. This makes the installer larger. Windows may show a SmartScreen warning until the executable is code signed.
+
 ### Run Checks &amp; Tests
 
 ```bash
