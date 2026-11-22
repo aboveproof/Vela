@@ -1,0 +1,9 @@
+/target
+ui/node_modules
+ui/dist
+.cargo/config.toml
+**/*.rs.bk
+*.pdb
+.DS_Store
+Thumbs.db
+*.vela-vault
