@@ -326,12 +326,28 @@ export function App() {
     }
   };
 
+  const shellQuote = (path: string): string => {
+    if (/[\s"'$&|;()<>?*\\]/.test(path)) {
+      return `'${path.replace(/'/g, "'\\''")}'`;
+    }
+    return path;
+  };
+
   const sftpCopyPathToTerminal = (entry: RemoteEntry) => {
     if (!activeSession) return;
-    const quoted = entry.path.includes(" ")
-      ? `'${entry.path.replace(/'/g, "'\\''")}'`
-      : entry.path;
-    void invoke("send_pty_input", { sessionId: activeSession.id, data: quoted });
+    void invoke("send_pty_input", {
+      sessionId: activeSession.id,
+      data: shellQuote(entry.path),
+    });
+    termRefs.current.get(activeSession.id)?.focus();
+  };
+
+  const sftpCdInTerminal = (entry: RemoteEntry) => {
+    if (!activeSession) return;
+    void invoke("send_pty_input", {
+      sessionId: activeSession.id,
+      data: `cd ${shellQuote(entry.path)}\r`,
+    });
     termRefs.current.get(activeSession.id)?.focus();
   };
 
@@ -650,10 +666,12 @@ export function App() {
           }
         }}
         onCopyPath={(entry) => {
-          void navigator.clipboard.writeText(entry.path);
-          pushToast(`Copied ${entry.path}`, "info");
+          const text = shellQuote(entry.path);
+          void navigator.clipboard.writeText(text);
+          pushToast(`Copied ${text}`, "info");
         }}
         onCopyPathToTerm={sftpCopyPathToTerminal}
+        onCdInTerminal={sftpCdInTerminal}
         onChmodEntry={(entry) => setActiveModal({ kind: "chmod", entry })}
         onGoUp={() => {
           if (activeSession) {

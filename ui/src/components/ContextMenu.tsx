@@ -34,6 +34,7 @@ interface ContextMenuProps {
   onDeleteEntry: (e: RemoteEntry) => void;
   onCopyPath: (e: RemoteEntry) => void;
   onCopyPathToTerm: (e: RemoteEntry) => void;
+  onCdInTerminal: (e: RemoteEntry) => void;
   onChmodEntry: (e: RemoteEntry) => void;
   onGoUp: () => void;
   onNewFolder: () => void;
@@ -172,6 +173,18 @@ export function ContextMenu(props: ContextMenuProps) {
               <Terminal className="h-3.5 w-3.5" style={{ color: theme.textMuted }} />
               <span>Copy path to terminal</span>
             </button>
+            {menu.entry.kind === "directory" && (
+              <button
+                className={itemCls}
+                onClick={() => {
+                  onClose();
+                  props.onCdInTerminal(menu.entry);
+                }}
+              >
+                <Terminal className="h-3.5 w-3.5" style={{ color: theme.success }} />
+                <span>Open in terminal (cd)</span>
+              </button>
+            )}
             <button
               className={itemCls}
               onClick={() => {
