@@ -99,6 +99,7 @@ export function App() {
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>("hosts");
   const [focusHostField, setFocusHostField] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(296);
+  const [sftpDockHeight, setSftpDockHeight] = useState(300);
   const [quickConnect, setQuickConnect] = useState("");
   const [form, setForm] = useState<QuickFormValues>(EMPTY_FORM);
   const [selectedSftpPath, setSelectedSftpPath] = useState<string | null>(null);
@@ -114,6 +115,8 @@ export function App() {
   const ptyWritersRef = useRef<Map<string, (bytes: Uint8Array) => void>>(new Map());
   const ptyBuffersRef = useRef<Map<string, Uint8Array[]>>(new Map());
   const resizeCleanupRef = useRef<(() => void) | null>(null);
+  const workspaceRef = useRef<HTMLDivElement | null>(null);
+  const sidebarRef = useRef<HTMLDivElement | null>(null);
 
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -574,6 +577,13 @@ export function App() {
         onSelect: () => setSidebarOpen((v) => !v),
       },
       {
+        id: "act:files",
+        group: "Workspace",
+        label: "Open remote files",
+        icon: <Folder className="h-3.5 w-3.5" />,
+        onSelect: () => { setSidebarTab("sftp"); setSidebarOpen(true); },
+      },
+      {
         id: "act:tunnels",
         group: "Workspace",
         label: "Open Port Forwarding / Tunnels",
@@ -615,7 +625,21 @@ export function App() {
       },
     );
 
-    if (sessions.length > 1) {
+    for (const position of ["left", "right", "bottom", "top"] as SftpDockPosition[]) {
+      items.push({
+        id: `dock:${position}`,
+        group: "Remote files",
+        label: `Dock file browser ${position}`,
+        icon: <Folder className="h-3.5 w-3.5" />,
+        onSelect: () => {
+          persistSettings({ ...settings, sftp_position: position });
+          setSidebarTab("sftp");
+          setSidebarOpen(true);
+        },
+      });
+    }
+
+    if (connectedSessions.length > 1) {
       items.push(
         {
           id: "act:split",
@@ -661,7 +685,7 @@ export function App() {
     snippets,
     activeSession,
     sidebarOpen,
-    sessions.length,
+    connectedSessions.length,
     splitSessionId,
     broadcastEnabled,
     settings,
@@ -741,27 +765,40 @@ export function App() {
 
   const activeTerm = activeSessionId ? termRefs.current.get(activeSessionId) ?? null : null;
 
-  const startResizeSidebar = (e: React.MouseEvent) => {
+  const startResizeSidebar = (e: React.PointerEvent) => {
+    if (e.button !== 0) return;
     e.preventDefault();
     resizeCleanupRef.current?.();
     const startX = e.clientX;
-    const startW = sidebarWidth;
+    const startY = e.clientY;
+    const startW = sidebarRef.current?.clientWidth ?? sidebarWidth;
+    const startH = sidebarRef.current?.clientHeight ?? sftpDockHeight;
     const isRight = sidebarTab === "sftp" && settings.sftp_position === "right";
+    const isBottom = sidebarTab === "sftp" && settings.sftp_position === "bottom";
+    const availableWidth = workspaceRef.current?.clientWidth ?? window.innerWidth - 60;
+    const availableHeight = workspaceRef.current?.clientHeight ?? window.innerHeight - 90;
     document.body.style.userSelect = "none";
 
-    const onMove = (ev: MouseEvent) => {
-      const delta = isRight ? startX - ev.clientX : ev.clientX - startX;
-      setSidebarWidth(Math.max(220, Math.min(520, startW + delta)));
+    const onMove = (ev: PointerEvent) => {
+      if (horizontalDock) {
+        const delta = isBottom ? startY - ev.clientY : ev.clientY - startY;
+        setSftpDockHeight(Math.max(180, Math.min(520, availableHeight - 140, startH + delta)));
+      } else {
+        const delta = isRight ? startX - ev.clientX : ev.clientX - startX;
+        setSidebarWidth(Math.max(220, Math.min(520, availableWidth - 300, startW + delta)));
+      }
     };
     const cleanup = () => {
       document.body.style.userSelect = "";
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", cleanup);
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", cleanup);
+      window.removeEventListener("pointercancel", cleanup);
       resizeCleanupRef.current = null;
     };
     resizeCleanupRef.current = cleanup;
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", cleanup);
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", cleanup);
+    window.addEventListener("pointercancel", cleanup);
   };
 
   const horizontalDock =
@@ -769,14 +806,8 @@ export function App() {
     sidebarTab === "sftp" &&
     (settings.sftp_position === "top" || settings.sftp_position === "bottom");
 
-  const sidebarBorderClass =
-    sidebarTab === "sftp" && settings.sftp_position === "right"
-      ? "border-l"
-      : sidebarTab === "sftp" && settings.sftp_position === "top"
-        ? "border-b"
-        : sidebarTab === "sftp" && settings.sftp_position === "bottom"
-          ? "border-t"
-          : "border-r";
+  const dockAtEnd = sidebarTab === "sftp" &&
+    (settings.sftp_position === "right" || settings.sftp_position === "bottom");
 
   const sidebarTitles: Record<SidebarTab, string> = {
     hosts: "Connections",
@@ -789,12 +820,17 @@ export function App() {
 
   const sidebarEl = (
     <div
-      className={`vela-sidebar flex shrink-0 flex-col gap-3 ${sidebarBorderClass} p-4`}
+      ref={sidebarRef}
+      className={`vela-sidebar flex min-h-0 min-w-0 shrink-0 flex-col gap-2.5 overflow-hidden rounded-xl border p-3 ${horizontalDock ? "vela-sidebar-horizontal" : ""}`}
       style={{
         width: horizontalDock ? "100%" : sidebarWidth,
-        height: horizontalDock ? 230 : "100%",
+        maxWidth: horizontalDock ? "100%" : "calc(100% - 300px)",
+        height: horizontalDock ? sftpDockHeight : "100%",
+        maxHeight: horizontalDock ? "calc(100% - 140px)" : "100%",
         backgroundColor: theme.bgSurface,
         borderColor: theme.border,
+        order: dockAtEnd ? 3 : 1,
+        display: sidebarOpen ? "flex" : "none",
       }}
     >
       {!horizontalDock && (
@@ -838,6 +874,7 @@ export function App() {
         )}
         {sidebarTab === "sftp" && (
           <SftpSidebar
+            horizontal={horizontalDock}
             session={activeSession}
             bookmarks={activeProfile?.bookmarks ?? []}
             settings={settings}
@@ -893,6 +930,7 @@ export function App() {
             }}
             onToggleFollowCd={(v) => persistSettings({ ...settings, follow_terminal_folder: v })}
             onToggleMonitoring={(v) => persistSettings({ ...settings, remote_monitoring: v })}
+            onSetDockPosition={(position) => persistSettings({ ...settings, sftp_position: position })}
             onMiddleClickEntry={sftpCopyPathToTerminal}
             onItemContextMenu={(entry, x, y) =>
               setContextMenu({ kind: "sftp_item", entry, x, y })
@@ -994,15 +1032,41 @@ export function App() {
     </div>
   );
 
-  const resizeHandle = !horizontalDock && sidebarOpen && (
+  const resizeHandle = (
     <div
-      onMouseDown={startResizeSidebar}
-      className="h-full w-1 shrink-0 cursor-col-resize transition-colors hover:bg-white/15"
+      role="separator"
+      aria-label={horizontalDock ? "Resize file browser height" : "Resize sidebar width"}
+      aria-orientation={horizontalDock ? "horizontal" : "vertical"}
+      aria-valuemin={horizontalDock ? 180 : 220}
+      aria-valuemax={horizontalDock ? 520 : 520}
+      aria-valuenow={horizontalDock ? sidebarRef.current?.clientHeight ?? sftpDockHeight : sidebarRef.current?.clientWidth ?? sidebarWidth}
+      tabIndex={sidebarOpen ? 0 : -1}
+      onPointerDown={startResizeSidebar}
+      onKeyDown={(e) => {
+        const step = e.shiftKey ? 60 : 20;
+        if (e.key === "Home") {
+          e.preventDefault();
+          if (horizontalDock) setSftpDockHeight(300);
+          else setSidebarWidth(296);
+        } else if (horizontalDock && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+          e.preventDefault();
+          const direction = (settings.sftp_position === "bottom" ? e.key === "ArrowUp" : e.key === "ArrowDown") ? 1 : -1;
+          setSftpDockHeight((height) => Math.max(180, Math.min(520, height + step * direction)));
+        } else if (!horizontalDock && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
+          e.preventDefault();
+          const direction = (settings.sftp_position === "right" && sidebarTab === "sftp" ? e.key === "ArrowLeft" : e.key === "ArrowRight") ? 1 : -1;
+          setSidebarWidth((width) => Math.max(220, Math.min(520, width + step * direction)));
+        }
+      }}
+      onDoubleClick={() => horizontalDock ? setSftpDockHeight(300) : setSidebarWidth(296)}
+      className={`vela-resize-handle shrink-0 ${horizontalDock ? "h-2 w-full cursor-row-resize" : "h-full w-2 cursor-col-resize"}`}
+      style={{ order: 2, display: sidebarOpen ? "block" : "none" }}
+      title="Drag to resize; double-click to reset"
     />
   );
 
   const terminalArea = (
-    <div className="vela-workspace flex min-h-0 min-w-0 flex-1 flex-col p-2.5 pl-1.5">
+    <div className="vela-workspace flex min-h-0 min-w-0 flex-1 flex-col p-1" style={{ order: dockAtEnd ? 1 : 3 }}>
       <div
         className={`vela-terminal-shell relative flex min-h-0 flex-1 overflow-hidden rounded-2xl border ${splitSessionId ? "divide-x" : ""}`}
         style={{ backgroundColor: theme.termBg, borderColor: theme.border }}
@@ -1149,7 +1213,7 @@ export function App() {
         onToggleBroadcast={() => setBroadcastEnabled((v) => !v)}
       />
 
-      <div className="flex min-h-0 flex-1">
+      <div className="flex min-h-0 flex-1 gap-1.5 p-1.5 pl-0">
         <div
           className="vela-rail flex w-[60px] shrink-0 flex-col items-center gap-1.5 border-r py-4"
           style={{ backgroundColor: theme.bgBase, borderColor: theme.border }}
@@ -1163,31 +1227,15 @@ export function App() {
           {railBtn("settings", Settings, "Settings")}
         </div>
 
-        {!sidebarOpen ? (
-          terminalArea
-        ) : sidebarTab === "sftp" && settings.sftp_position === "right" ? (
-          <>
-            {terminalArea}
-            {resizeHandle}
-            {sidebarEl}
-          </>
-        ) : sidebarTab === "sftp" && settings.sftp_position === "top" ? (
-          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-            {sidebarEl}
-            {terminalArea}
-          </div>
-        ) : sidebarTab === "sftp" && settings.sftp_position === "bottom" ? (
-          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-            {terminalArea}
-            {sidebarEl}
-          </div>
-        ) : (
-          <>
-            {sidebarEl}
-            {resizeHandle}
-            {terminalArea}
-          </>
-        )}
+        <div
+          ref={workspaceRef}
+          className={`flex min-h-0 min-w-0 flex-1 gap-0.5 ${horizontalDock ? "flex-col" : "flex-row"}`}
+        >
+          {/* Keep these siblings mounted in the same order. Remounting TerminalPane loses xterm scrollback. */}
+          {sidebarEl}
+          {resizeHandle}
+          {terminalArea}
+        </div>
       </div>
 
       <div

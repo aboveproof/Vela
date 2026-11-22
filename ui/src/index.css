@@ -116,6 +116,44 @@ input::placeholder, textarea::placeholder {
   border-color: color-mix(in srgb, var(--vela-accent) 55%, var(--vela-border)) !important;
 }
 
+.vela-resize-handle {
+  position: relative;
+  touch-action: none;
+}
+.vela-resize-handle::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 2px;
+  height: 32px;
+  border-radius: 99px;
+  background: var(--vela-border);
+  transition: background-color 180ms;
+}
+.vela-resize-handle[aria-orientation="horizontal"]::after {
+  width: 32px;
+  height: 2px;
+}
+.vela-resize-handle:hover::after {
+  background: var(--vela-accent);
+}
+
+.vela-sftp-horizontal {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
+  grid-template-areas: "actions location" "sort sort" "columns columns" "files files" "options options";
+  column-gap: 12px;
+  row-gap: 6px;
+}
+.vela-sftp-actions { grid-area: actions; }
+.vela-sftp-location { grid-area: location; }
+.vela-sftp-sort { grid-area: sort; }
+.vela-sftp-columns { grid-area: columns; }
+.vela-sftp-files { grid-area: files; }
+.vela-sftp-options { grid-area: options; }
+
 .vela-terminal-shell {
   box-shadow: 0 8px 30px #00000012, inset 0 1px #ffffff09;
 }
@@ -139,6 +177,11 @@ input::placeholder, textarea::placeholder {
 @media (max-width: 920px) {
   .vela-command-button span, .vela-command-button kbd { display: none; }
   .vela-command-button { width: 34px; justify-content: center; padding: 0; }
+}
+
+@media (max-width: 880px) {
+  .vela-sftp-horizontal .vela-sftp-location > div { max-width: 92px; }
+  .vela-sftp-horizontal .vela-sftp-location > div:last-child { width: 128px; max-width: 128px; }
 }
 
 @media (max-width: 720px) {
