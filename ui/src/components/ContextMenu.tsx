@@ -4,6 +4,7 @@ import {
   Copy,
   CornerLeftUp,
   Download,
+  Eye,
   FilePlus,
   Folder,
   FolderPlus,
@@ -28,6 +29,7 @@ interface ContextMenuProps {
   onClose: () => void;
   // SFTP item & bg
   onOpenEntry: (e: RemoteEntry) => void;
+  onPreviewEntry: (e: RemoteEntry) => void;
   onDownloadEntry: (e: RemoteEntry) => void;
   onUploadHere: () => void;
   onRenameEntry: (e: RemoteEntry) => void;
@@ -97,7 +99,7 @@ export function ContextMenu(props: ContextMenuProps) {
     >
       <div
         ref={menuRef}
-        className="fixed overflow-y-auto rounded-xl border p-1.5 shadow-2xl"
+        className="menu-enter fixed overflow-y-auto rounded-xl border p-1.5 shadow-2xl"
         style={{
           left: pos.left,
           top: pos.top,
@@ -121,6 +123,18 @@ export function ContextMenu(props: ContextMenuProps) {
               <Folder className="h-3.5 w-3.5" style={{ color: theme.warning }} />
               <span>{menu.entry.kind === "directory" ? "Open folder" : "Open / Edit locally"}</span>
             </button>
+            {menu.entry.kind !== "directory" && (
+              <button
+                className={itemCls}
+                onClick={() => {
+                  onClose();
+                  props.onPreviewEntry(menu.entry);
+                }}
+              >
+                <Eye className="h-3.5 w-3.5" style={{ color: theme.textMuted }} />
+                <span>Quick preview</span>
+              </button>
+            )}
             <button
               className={itemCls}
               onClick={() => {

@@ -12,12 +12,15 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 use vela_core::{
     AppSettings, AuthMethod, HostKeyStatus, HostProfile, KnownHostsStore, OsKeyringStore,
-    ProfileStore, SecretStore, SettingsStore, UserError,
+    ProfileStore, SecretStore, SettingsStore, Snippet, SnippetStore, UserError,
+    read_default_ssh_config,
 };
+use vela_ssh::keys::validate_public_key_for_deploy;
 use vela_ssh::sftp::{join_remote_path, parent_remote_path, validate_remote_entry_name};
 use vela_ssh::{
-    AuthCredentials, ConnectConfig, PtySize, RemoteEntry, ServerStats, SessionCommand,
-    SessionEvent, SshSessionHandle, connect_session,
+    AuthCredentials, ConnectConfig, FilePreview, PtySize, RemoteEntry, ServerStats, SessionCommand,
+    SessionEvent, SshKeyInfo, SshSessionHandle, TunnelInfo, connect_session, generate_ed25519_key,
+    list_ssh_keys as scan_ssh_keys,
 };
 
 pub struct PendingPrompt {
@@ -31,6 +34,7 @@ pub struct AppState {
     pub store_lock: Mutex<()>,
     pub profile_store: Option<ProfileStore>,
     pub settings_store: Option<SettingsStore>,
+    pub snippet_store: Option<SnippetStore>,
     pub known_hosts: Option<KnownHostsStore>,
     pub secrets: OsKeyringStore,
 }
@@ -43,6 +47,7 @@ impl AppState {
             store_lock: Mutex::new(()),
             profile_store: ProfileStore::default_store().ok(),
             settings_store: SettingsStore::default_store().ok(),
+            snippet_store: SnippetStore::default_store().ok(),
             known_hosts: KnownHostsStore::default_store().ok(),
             secrets: OsKeyringStore,
         }
@@ -117,6 +122,18 @@ pub struct NoticePayload {
 pub struct ErrorPayload {
     pub session_id: String,
     pub error: UserError,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FilePreviewPayload {
+    pub session_id: String,
+    pub preview: FilePreview,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TunnelsPayload {
+    pub session_id: String,
+    pub tunnels: Vec<TunnelInfo>,
 }
 
 #[derive(Deserialize)]
@@ -423,6 +440,24 @@ pub async fn connect_profile(
                             session_id: sid.clone(),
                             path,
                             entries,
+                        },
+                    );
+                }
+                SessionEvent::FilePreview(preview) => {
+                    let _ = app_handle.emit(
+                        "vela://preview",
+                        FilePreviewPayload {
+                            session_id: sid.clone(),
+                            preview,
+                        },
+                    );
+                }
+                SessionEvent::TunnelsUpdated(tunnels) => {
+                    let _ = app_handle.emit(
+                        "vela://tunnels",
+                        TunnelsPayload {
+                            session_id: sid.clone(),
+                            tunnels,
                         },
                     );
                 }
@@ -803,4 +838,208 @@ pub fn open_external_url(url: String) -> Result<(), String> {
         return Err("Only http:// and https:// URLs can be opened".to_string());
     }
     open::that(trimmed).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn list_snippets(state: State<'_, AppState>) -> Result<Vec<Snippet>, String> {
+    let Some(store) = &state.snippet_store else {
+        return Ok(vela_core::starter_snippets());
+    };
+    store.load().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn save_snippet(
+    name: String,
+    command: String,
+    folder: Option<String>,
+    auto_execute: bool,
+    state: State<'_, AppState>,
+) -> Result<Snippet, String> {
+    let clean_name = name.trim().to_string();
+    if clean_name.is_empty() {
+        return Err("Snippet name is required".to_string());
+    }
+    let clean_command = command.trim().to_string();
+    if clean_command.is_empty() {
+        return Err("Snippet command is required".to_string());
+    }
+    let clean_folder = folder
+        .map(|f| f.trim().to_string())
+        .filter(|f| !f.is_empty());
+
+    let snippet = Snippet::new(clean_name, clean_command, clean_folder, auto_execute);
+
+    if let Some(store) = &state.snippet_store {
+        let _lock = state
+            .store_lock
+            .lock()
+            .map_err(|e| format!("store lock poisoned: {e}"))?;
+        let mut snippets = store.load().map_err(|e| e.to_string())?;
+        snippets.push(snippet.clone());
+        store.save(&snippets).map_err(|e| e.to_string())?;
+    }
+
+    Ok(snippet)
+}
+
+#[tauri::command]
+pub fn delete_snippet(snippet_id: String, state: State<'_, AppState>) -> Result<(), String> {
+    let uuid = Uuid::parse_str(&snippet_id).map_err(|e| e.to_string())?;
+    let Some(store) = &state.snippet_store else {
+        return Ok(());
+    };
+    let _lock = state
+        .store_lock
+        .lock()
+        .map_err(|e| format!("store lock poisoned: {e}"))?;
+    let mut snippets = store.load().map_err(|e| e.to_string())?;
+    let before = snippets.len();
+    snippets.retain(|s| s.id != uuid);
+    if snippets.len() != before {
+        store.save(&snippets).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn import_ssh_config(state: State<'_, AppState>) -> Result<Vec<HostProfile>, String> {
+    let parsed = read_default_ssh_config().map_err(|e| e.to_string())?;
+    if parsed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let Some(store) = &state.profile_store else {
+        return Err("profile store unavailable".to_string());
+    };
+
+    let _lock = state
+        .store_lock
+        .lock()
+        .map_err(|e| format!("store lock poisoned: {e}"))?;
+    let mut existing = store.load().map_err(|e| e.to_string())?;
+
+    let mut newly_imported = Vec::new();
+    for candidate in parsed {
+        let already_exists = existing.iter().any(|p| {
+            p.host.eq_ignore_ascii_case(&candidate.host)
+                && p.port == candidate.port
+                && p.username == candidate.username
+        });
+        if !already_exists {
+            existing.push(candidate.clone());
+            newly_imported.push(candidate);
+        }
+    }
+
+    if !newly_imported.is_empty() {
+        store.save(&existing).map_err(|e| e.to_string())?;
+    }
+    Ok(newly_imported)
+}
+
+#[tauri::command]
+pub fn toggle_bookmark(
+    profile_id: String,
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<String>, String> {
+    let uuid = Uuid::parse_str(&profile_id).map_err(|e| e.to_string())?;
+    let clean_path = path.trim().to_string();
+    if clean_path.is_empty() {
+        return Err("Bookmark path cannot be empty".to_string());
+    }
+    let store = state
+        .profile_store
+        .as_ref()
+        .ok_or_else(|| "profile store unavailable".to_string())?;
+
+    let _lock = state
+        .store_lock
+        .lock()
+        .map_err(|e| format!("store lock poisoned: {e}"))?;
+    let mut profiles = store.load().map_err(|e| e.to_string())?;
+    let profile = profiles
+        .iter_mut()
+        .find(|p| p.id == uuid)
+        .ok_or_else(|| "profile not found".to_string())?;
+
+    if let Some(pos) = profile.bookmarks.iter().position(|b| b == &clean_path) {
+        profile.bookmarks.remove(pos);
+    } else {
+        profile.bookmarks.push(clean_path);
+    }
+    let updated = profile.bookmarks.clone();
+    store.save(&profiles).map_err(|e| e.to_string())?;
+    Ok(updated)
+}
+
+#[tauri::command]
+pub fn list_ssh_keys() -> Result<Vec<SshKeyInfo>, String> {
+    scan_ssh_keys().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn generate_ssh_key(name: String, comment: String) -> Result<SshKeyInfo, String> {
+    generate_ed25519_key(&name, &comment).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn deploy_public_key(
+    session_id: String,
+    public_key: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let validated = validate_public_key_for_deploy(&public_key).map_err(|e| e.to_string())?;
+    state
+        .send_cmd(&session_id, SessionCommand::DeployPublicKey(validated))
+        .await
+}
+
+#[tauri::command]
+pub async fn start_local_tunnel(
+    session_id: String,
+    local_port: u16,
+    remote_host: String,
+    remote_port: u16,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let host = validate_host_name(&remote_host)?;
+    if local_port == 0 || remote_port == 0 {
+        return Err("Ports must be between 1 and 65535".to_string());
+    }
+    let tunnel_id = Uuid::new_v4().to_string();
+    state
+        .send_cmd(
+            &session_id,
+            SessionCommand::StartLocalTunnel {
+                id: tunnel_id.clone(),
+                local_port,
+                remote_host: host,
+                remote_port,
+            },
+        )
+        .await?;
+    Ok(tunnel_id)
+}
+
+#[tauri::command]
+pub async fn stop_local_tunnel(
+    session_id: String,
+    tunnel_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state
+        .send_cmd(&session_id, SessionCommand::StopLocalTunnel { id: tunnel_id })
+        .await
+}
+
+#[tauri::command]
+pub async fn sftp_read_preview(
+    session_id: String,
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state
+        .send_cmd(&session_id, SessionCommand::SftpReadPreview { path })
+        .await
 }

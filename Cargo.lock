@@ -5864,10 +5864,12 @@ dependencies = [
 name = "vela-ssh"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "bytes",
  "directories",
  "notify",
  "open",
+ "rand",
  "russh",
  "russh-sftp",
  "serde",

@@ -131,26 +131,29 @@ GNU <code>windres</code> fails if the Cargo target directory path contains an am
 
 | Input | Action |
 | :--- | :--- |
+| `Ctrl + K` / `Ctrl + Shift + P` | Open Command Palette (connect hosts, run snippets, split, switch themes) |
 | `Ctrl + B` | Toggle sidebar |
 | `Ctrl + Shift + C` | Copy selected terminal text |
-| `Ctrl + Shift + V` / `Shift + Insert` | Paste clipboard into active terminal |
+| `Ctrl + Shift + V` / `Shift + Insert` | Paste clipboard into active terminal (bracketed paste) |
 | `Ctrl + Shift + F` | Open terminal Find bar |
 | `Ctrl + Shift + S` | Save terminal output to a file |
-| `Middle-click` on SFTP item | Insert quoted remote path into terminal |
+| `Middle-click` on SFTP item | Insert shell-quoted remote path into terminal |
 | `Double-click` on SFTP item | Open folder or edit file in local editor (re-uploads on save) |
-| `Right-click` on SFTP item / blank area / terminal | Context menus for file ops, sidebar dock position, and terminal actions |
-| `Drag & drop` files onto window | Upload files to the current remote SFTP folder |
+| `Right-click` on SFTP item / blank area / terminal | Context menus for file ops, Quick Preview, `cd`, sidebar dock position, and terminal actions |
+| `Drag & drop` files or folders onto window | Upload files or folders recursively to the current remote SFTP folder |
 
 <h2 id="roadmap">Roadmap</h2>
 
 - [x] Pure-Rust SSH + PTY + multiplexed SFTP engine (`russh` / `russh-sftp`)
-- [x] Dockable SFTP browser with full file ops, drag-and-drop, and local-edit auto-upload
-- [x] `xterm.js` WebGL terminal with OSC 7 folder tracking, Find bar, and context menu
+- [x] Dockable SFTP browser with full file ops, pinned bookmarks, instant filter, quick inline preview, recursive drag-and-drop, and local-edit auto-upload
+- [x] `xterm.js` WebGL terminal with OSC 7 folder tracking, Find bar, bracketed paste, and context menu
 - [x] Live host monitoring strip (CPU sparkline, RAM, network TX/RX, uptime, users, disks)
+- [x] `Ctrl+K` Command Palette, side-by-side Split View, and multi-tab Broadcast Input
+- [x] Saved Command Snippets with 1-click run and broadcast execution
+- [x] Local Port Forwarding (`-L`) SSH Tunnel Manager with live connection counts
+- [x] `~/.ssh/config` importer and built-in Ed25519 SSH Key Manager with 1-click `ssh-copy-id`
 - [x] OS keychain credentials, TOFU `known_hosts`, custom fonts, and themes
-- [ ] Split panes inside tabs and multi-pane input broadcast
-- [ ] Port forwarding manager (`-L`, `-R`, SOCKS5 `-D`) and `ProxyJump` bastion chaining
-- [ ] `~/.ssh/config` importer and built-in Ed25519 SSH key generator (`ssh-copy-id`)
+- [ ] Remote (`-R`) and Dynamic SOCKS5 (`-D`) tunnels + `ProxyJump` bastion chaining
 - [ ] Encrypted `.vela-vault` backup/sync export (Argon2id + ChaCha20-Poly1305)
 
 ## License

@@ -20,6 +20,7 @@ directories = "6.0"
 keyring = "4.2"
 notify = "9.0"
 open = "5.4"
+rand = "0.10"
 russh = "0.65"
 russh-sftp = "4.0"
 serde = { version = "1", features = ["derive"] }

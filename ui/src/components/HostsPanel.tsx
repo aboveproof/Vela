@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Play, Server, Trash2 } from "lucide-react";
+import { Download, Play, Server, Trash2 } from "lucide-react";
 import type { HostProfile, ThemeTokens } from "../types";
 
 export interface QuickFormValues {
@@ -21,6 +21,7 @@ interface HostsPanelProps {
   onSaveAndConnect: () => void;
   onConnectProfile: (profileId: string) => void;
   onDeleteProfile: (profileId: string) => void;
+  onImportSshConfig: () => void;
 }
 
 export function HostsPanel({
@@ -31,6 +32,7 @@ export function HostsPanel({
   onSaveAndConnect,
   onConnectProfile,
   onDeleteProfile,
+  onImportSshConfig,
 }: HostsPanelProps) {
   const [filter, setFilter] = useState("");
 
@@ -52,15 +54,29 @@ export function HostsPanel({
 
   return (
     <div className="flex h-full flex-col gap-3 overflow-y-auto pr-0.5">
-      {profiles.length > 0 && (
+      <div className="flex items-center gap-1.5">
         <input
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
           placeholder="Filter saved hosts..."
-          className="w-full rounded-lg border px-2.5 py-1.5 text-xs outline-none"
+          className="min-w-0 flex-1 rounded-lg border px-2.5 py-1.5 text-xs outline-none"
           style={inputStyle}
         />
-      )}
+        <button
+          type="button"
+          onClick={onImportSshConfig}
+          title="Import hosts from ~/.ssh/config"
+          className="flex shrink-0 items-center gap-1 rounded-lg border px-2 py-1.5 text-[11px] transition-colors hover:bg-white/6"
+          style={{
+            backgroundColor: theme.bgElevated,
+            borderColor: theme.border,
+            color: theme.textPrimary,
+          }}
+        >
+          <Download className="h-3 w-3" style={{ color: theme.textMuted }} />
+          <span>Import</span>
+        </button>
+      </div>
 
       <div className="space-y-1.5">
         {filtered.length === 0 ? (

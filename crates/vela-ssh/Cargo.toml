@@ -10,10 +10,12 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+base64.workspace = true
 bytes.workspace = true
 directories.workspace = true
 notify.workspace = true
 open.workspace = true
+rand.workspace = true
 russh.workspace = true
 russh-sftp.workspace = true
 serde.workspace = true

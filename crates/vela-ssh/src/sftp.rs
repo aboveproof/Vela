@@ -26,6 +26,17 @@ pub struct RemoteEntry {
     pub modified_epoch: Option<u32>,
 }
 
+pub const DEFAULT_PREVIEW_MAX_BYTES: usize = 256 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FilePreview {
+    pub path: String,
+    pub name: String,
+    pub content: String,
+    pub truncated: bool,
+    pub size: u64,
+}
+
 impl RemoteEntry {
     pub fn is_dir(&self) -> bool {
         self.kind == RemoteEntryKind::Directory
@@ -488,6 +499,89 @@ pub async fn delete_remote(sftp: &SftpSession, path: &str) -> VelaResult<()> {
     Ok(())
 }
 
+/// Reads up to `max_bytes` of a remote text file for inline preview.
+/// Rejects directories and binary files (NUL byte in the first 4 KiB).
+pub async fn read_file_preview(
+    sftp: &SftpSession,
+    remote_path: &str,
+    max_bytes: usize,
+) -> VelaResult<FilePreview> {
+    let meta = sftp.metadata(remote_path).await.map_err(|err| VelaError::Sftp {
+        path: remote_path.to_string(),
+        reason: err.to_string(),
+    })?;
+    if meta.is_dir() {
+        return Err(VelaError::Sftp {
+            path: remote_path.to_string(),
+            reason: "Cannot preview a directory".to_string(),
+        });
+    }
+
+    let mut remote = sftp.open(remote_path).await.map_err(|err| VelaError::Sftp {
+        path: remote_path.to_string(),
+        reason: err.to_string(),
+    })?;
+
+    let limit = max_bytes.saturating_add(1);
+    let mut buf = Vec::with_capacity(limit.min(64 * 1024));
+    let mut chunk = [0u8; 16 * 1024];
+
+    while buf.len() < limit {
+        let to_read = chunk.len().min(limit - buf.len());
+        let n = remote
+            .read(&mut chunk[..to_read])
+            .await
+            .map_err(|err| VelaError::Sftp {
+                path: remote_path.to_string(),
+                reason: err.to_string(),
+            })?;
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+    }
+
+    build_file_preview(remote_path, &buf, meta.size, max_bytes)
+}
+
+pub(crate) fn build_file_preview(
+    remote_path: &str,
+    raw_bytes: &[u8],
+    reported_size: Option<u64>,
+    max_bytes: usize,
+) -> VelaResult<FilePreview> {
+    let probe_len = raw_bytes.len().min(4096);
+    if raw_bytes[..probe_len].contains(&0) {
+        return Err(VelaError::Sftp {
+            path: remote_path.to_string(),
+            reason: "Binary file cannot be previewed".to_string(),
+        });
+    }
+
+    let truncated = raw_bytes.len() > max_bytes
+        || reported_size.is_some_and(|s| s > max_bytes as u64);
+    let slice = if raw_bytes.len() > max_bytes {
+        &raw_bytes[..max_bytes]
+    } else {
+        raw_bytes
+    };
+    let size = reported_size.unwrap_or(raw_bytes.len() as u64);
+    let name = remote_path
+        .rsplit('/')
+        .next()
+        .filter(|n| !n.is_empty())
+        .unwrap_or(remote_path)
+        .to_string();
+
+    Ok(FilePreview {
+        path: remote_path.to_string(),
+        name,
+        content: String::from_utf8_lossy(slice).into_owned(),
+        truncated,
+        size,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -530,5 +624,23 @@ mod tests {
         };
         assert_eq!(entry.format_permissions(), "rwxr-xr-x");
         assert_eq!(entry.format_size(), "2.0 KB");
+    }
+
+    #[test]
+    fn preview_rejects_binary_and_truncates_large_text() -> Result<(), Box<dyn std::error::Error>> {
+        let bin = b"\x7fELF\x00\x01\x02";
+        assert!(build_file_preview("/usr/bin/ls", bin, Some(7), 1024).is_err());
+
+        let text = b"hello world from vela";
+        let preview = build_file_preview("/etc/motd", text, Some(21), 5)?;
+        assert_eq!(preview.name, "motd");
+        assert_eq!(preview.content, "hello");
+        assert!(preview.truncated);
+        assert_eq!(preview.size, 21);
+
+        let full = build_file_preview("/etc/motd", text, Some(21), 1024)?;
+        assert!(!full.truncated);
+        assert_eq!(full.content, "hello world from vela");
+        Ok(())
     }
 }

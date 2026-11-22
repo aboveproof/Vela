@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import {
+  Bookmark,
   CornerLeftUp,
   Download,
   Eye,
@@ -10,13 +11,22 @@ import {
   FolderPlus,
   Link2,
   RefreshCw,
+  Search,
+  Star,
   Trash2,
   Upload,
 } from "lucide-react";
-import { formatBytes, type AppSettings, type RemoteEntry, type SessionTab, type ThemeTokens } from "../types";
+import {
+  formatBytes,
+  type AppSettings,
+  type RemoteEntry,
+  type SessionTab,
+  type ThemeTokens,
+} from "../types";
 
 interface SftpSidebarProps {
   session: SessionTab | null;
+  bookmarks: string[];
   settings: AppSettings;
   theme: ThemeTokens;
   selectedPath: string | null;
@@ -31,6 +41,7 @@ interface SftpSidebarProps {
   onNewFile: () => void;
   onDeleteSelected: () => void;
   onToggleHidden: () => void;
+  onToggleBookmark: (path: string) => void;
   onToggleFollowCd: (v: boolean) => void;
   onToggleMonitoring: (v: boolean) => void;
   onMiddleClickEntry: (entry: RemoteEntry) => void;
@@ -40,6 +51,7 @@ interface SftpSidebarProps {
 
 export function SftpSidebar({
   session,
+  bookmarks,
   settings,
   theme,
   selectedPath,
@@ -54,6 +66,7 @@ export function SftpSidebar({
   onNewFile,
   onDeleteSelected,
   onToggleHidden,
+  onToggleBookmark,
   onToggleFollowCd,
   onToggleMonitoring,
   onMiddleClickEntry,
@@ -61,10 +74,12 @@ export function SftpSidebar({
   onBgContextMenu,
 }: SftpSidebarProps) {
   const [pathDraft, setPathDraft] = useState(session?.sftpPath ?? "/");
+  const [filter, setFilter] = useState("");
 
   useEffect(() => {
     setPathDraft(session?.sftpPath ?? "/");
-  }, [session?.sftpPath]);
+    setFilter("");
+  }, [session?.sftpPath, session?.id]);
 
   if (!session) {
     return (
@@ -74,16 +89,20 @@ export function SftpSidebar({
     );
   }
 
-  const visibleEntries = session.sftpEntries.filter(
-    (e) => settings.show_hidden_files || !e.name.startsWith("."),
-  );
+  const isBookmarked = bookmarks.includes(session.sftpPath);
+  const query = filter.trim().toLowerCase();
+  const visibleEntries = session.sftpEntries.filter((e) => {
+    if (!settings.show_hidden_files && e.name.startsWith(".")) return false;
+    if (query && !e.name.toLowerCase().includes(query)) return false;
+    return true;
+  });
 
   const toolBtn =
     "flex h-7 w-7 items-center justify-center rounded-md transition-colors hover:bg-white/8";
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-2">
-      {/* MobaXterm-style SFTP toolbar */}
+      {/* SFTP icon toolbar */}
       <div className="flex items-center gap-0.5">
         <button onClick={onGoUp} title="Parent directory" className={toolBtn}>
           <CornerLeftUp className="h-3.5 w-3.5" style={{ color: theme.warning }} />
@@ -120,24 +139,82 @@ export function SftpSidebar({
         </button>
       </div>
 
-      {/* Editable path bar */}
+      {/* Editable path bar + pin bookmark star */}
       <form
         onSubmit={(e) => {
           e.preventDefault();
           if (pathDraft.trim()) onNavigate(pathDraft.trim());
         }}
+        className="flex items-center gap-1"
       >
         <input
           value={pathDraft}
           onChange={(e) => setPathDraft(e.target.value)}
-          className="w-full rounded-lg border px-2.5 py-1.5 font-mono text-[11px] outline-none"
+          className="min-w-0 flex-1 rounded-lg border px-2.5 py-1.5 font-mono text-[11px] outline-none"
           style={{
             backgroundColor: theme.bgBase,
             borderColor: theme.border,
             color: theme.textPrimary,
           }}
         />
+        {session.profileId && (
+          <button
+            type="button"
+            onClick={() => onToggleBookmark(session.sftpPath)}
+            title={isBookmarked ? "Remove bookmark" : "Pin directory bookmark"}
+            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border transition-colors hover:bg-white/6"
+            style={{
+              backgroundColor: theme.bgBase,
+              borderColor: theme.border,
+              color: isBookmarked ? theme.warning : theme.textMuted,
+            }}
+          >
+            <Star className={`h-3.5 w-3.5 ${isBookmarked ? "fill-current" : ""}`} />
+          </button>
+        )}
       </form>
+
+      {/* Pinned directory bookmarks strip */}
+      {bookmarks.length > 0 && (
+        <div className="flex flex-wrap gap-1">
+          {bookmarks.map((bm) => {
+            const label = bm === "/" ? "/" : bm.split("/").filter(Boolean).pop() ?? bm;
+            const isCurrent = session.sftpPath === bm;
+            return (
+              <button
+                key={bm}
+                type="button"
+                onClick={() => onNavigate(bm)}
+                title={bm}
+                className="flex max-w-full items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px] transition-colors hover:bg-white/8"
+                style={{
+                  backgroundColor: isCurrent ? theme.bgElevated : theme.bgBase,
+                  borderColor: theme.border,
+                  color: isCurrent ? theme.textPrimary : theme.textMuted,
+                }}
+              >
+                <Bookmark className="h-2.5 w-2.5 shrink-0" style={{ color: theme.warning }} />
+                <span className="truncate">{label}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Instant filename filter */}
+      <div
+        className="flex items-center gap-1.5 rounded-lg border px-2 py-1"
+        style={{ backgroundColor: theme.bgBase, borderColor: theme.border }}
+      >
+        <Search className="h-3 w-3 shrink-0" style={{ color: theme.textMuted }} />
+        <input
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+          placeholder="Filter files..."
+          className="min-w-0 flex-1 bg-transparent text-[11px] outline-none"
+          style={{ color: theme.textPrimary }}
+        />
+      </div>
 
       {/* Column headers */}
       <div
@@ -152,7 +229,7 @@ export function SftpSidebar({
         <span>Size</span>
       </div>
 
-      {/* File list (right-clicking empty area opens background context menu) */}
+      {/* File list */}
       <div
         className="min-h-0 flex-1 overflow-y-auto pr-0.5"
         onContextMenu={(e) => {
@@ -160,7 +237,7 @@ export function SftpSidebar({
           onBgContextMenu(e.clientX, e.clientY);
         }}
       >
-        {session.sftpPath !== "/" && (
+        {session.sftpPath !== "/" && !query && (
           <div
             onClick={onGoUp}
             className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1 text-xs transition-colors hover:bg-white/6"
@@ -173,7 +250,7 @@ export function SftpSidebar({
 
         {visibleEntries.length === 0 ? (
           <div className="px-2 py-4 text-center text-xs" style={{ color: theme.textMuted }}>
-            Empty directory
+            {query ? "No matching files" : "Empty directory"}
           </div>
         ) : (
           visibleEntries.map((entry) => {
@@ -221,7 +298,7 @@ export function SftpSidebar({
         )}
       </div>
 
-      {/* MobaXterm bottom checkboxes */}
+      {/* Bottom checkboxes */}
       <div
         className="space-y-1.5 rounded-lg border px-2.5 py-2 text-[11px]"
         style={{

@@ -1,19 +1,36 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { Folder, Server, Settings } from "lucide-react";
+import {
+  Cable,
+  Code2,
+  Columns2,
+  Folder,
+  KeyRound,
+  Palette,
+  Radio,
+  Server,
+  Settings,
+  Terminal,
+} from "lucide-react";
+import { CommandPalette, type PaletteItem } from "./components/CommandPalette";
 import { ContextMenu, type ContextMenuState } from "./components/ContextMenu";
+import { FilePreviewModal } from "./components/FilePreviewModal";
 import { HostsPanel, type QuickFormValues } from "./components/HostsPanel";
+import { KeysPanel } from "./components/KeysPanel";
 import { Modals, type ActiveModal } from "./components/Modals";
 import { MonitorStrip } from "./components/MonitorStrip";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { SftpSidebar } from "./components/SftpSidebar";
+import { SnippetsPanel } from "./components/SnippetsPanel";
 import { TerminalPane, type TerminalPaneHandle } from "./components/TerminalPane";
 import { Titlebar } from "./components/Titlebar";
 import { Toasts } from "./components/Toasts";
+import { TunnelsPanel } from "./components/TunnelsPanel";
 import {
   THEMES,
   type AppSettings,
+  type FilePreview,
   type HostKeyPrompt,
   type HostProfile,
   type RemoteEntry,
@@ -21,7 +38,11 @@ import {
   type SessionTab,
   type SftpDockPosition,
   type SidebarTab,
+  type Snippet,
+  type SshKeyInfo,
+  type ThemeId,
   type ToastItem,
+  type TunnelInfo,
 } from "./types";
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -67,14 +88,22 @@ function shellQuote(path: string): string {
 export function App() {
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [profiles, setProfiles] = useState<HostProfile[]>([]);
+  const [snippets, setSnippets] = useState<Snippet[]>([]);
+  const [sshKeys, setSshKeys] = useState<SshKeyInfo[]>([]);
   const [sessions, setSessions] = useState<SessionTab[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [splitSessionId, setSplitSessionId] = useState<string | null>(null);
+  const [broadcastEnabled, setBroadcastEnabled] = useState(false);
+
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>("hosts");
-  const [sidebarWidth, setSidebarWidth] = useState(290);
+  const [sidebarWidth, setSidebarWidth] = useState(296);
   const [quickConnect, setQuickConnect] = useState("");
   const [form, setForm] = useState<QuickFormValues>(EMPTY_FORM);
   const [selectedSftpPath, setSelectedSftpPath] = useState<string | null>(null);
+
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [preview, setPreview] = useState<FilePreview | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [activeModal, setActiveModal] = useState<ActiveModal | null>(null);
   const [hostKeyPrompts, setHostKeyPrompts] = useState<HostKeyPrompt[]>([]);
@@ -91,23 +120,44 @@ export function App() {
   activeSessionIdRef.current = activeSessionId;
   const sessionsRef = useRef(sessions);
   sessionsRef.current = sessions;
+  const broadcastRef = useRef(broadcastEnabled);
+  broadcastRef.current = broadcastEnabled;
 
   const theme = THEMES[settings.theme_id] ?? THEMES.obsidian;
   const activeSession = sessions.find((s) => s.id === activeSessionId) ?? null;
+  const activeProfile = activeSession?.profileId
+    ? profiles.find((p) => p.id === activeSession.profileId) ?? null
+    : null;
+  const totalTunnels = sessions.reduce((acc, s) => acc + s.tunnels.length, 0);
 
-  const pushToast = useCallback((title: string, kind: "info" | "error" = "info", detail?: string) => {
-    const id = crypto.randomUUID();
-    setToasts((prev) => [...prev.slice(-3), { id, title, detail, kind }]);
-    window.setTimeout(() => {
-      setToasts((prev) => prev.filter((t) => t.id !== id));
-    }, kind === "error" ? 6000 : 3200);
-  }, []);
+  const pushToast = useCallback(
+    (title: string, kind: "info" | "error" = "info", detail?: string) => {
+      const id = crypto.randomUUID();
+      setToasts((prev) => [...prev.slice(-3), { id, title, detail, kind }]);
+      window.setTimeout(
+        () => {
+          setToasts((prev) => prev.filter((t) => t.id !== id));
+        },
+        kind === "error" ? 6000 : 3200,
+      );
+    },
+    [],
+  );
 
-  const persistSettings = useCallback((next: AppSettings) => {
-    setSettings(next);
-    void invoke("save_settings", { settings: next }).catch((err: unknown) => {
-      pushToast("Failed to save settings", "error", String(err));
-    });
+  const persistSettings = useCallback(
+    (next: AppSettings) => {
+      setSettings(next);
+      void invoke("save_settings", { settings: next }).catch((err: unknown) => {
+        pushToast("Failed to save settings", "error", String(err));
+      });
+    },
+    [pushToast],
+  );
+
+  const refreshSshKeys = useCallback(() => {
+    void invoke<SshKeyInfo[]>("list_ssh_keys")
+      .then(setSshKeys)
+      .catch((err: unknown) => pushToast("Failed to scan SSH keys", "error", String(err)));
   }, [pushToast]);
 
   const registerPtyWriter = useCallback(
@@ -124,39 +174,58 @@ export function App() {
     return chunks;
   }, []);
 
-  // Load initial profiles & settings from Rust backend.
+  // Load initial profiles, snippets, SSH keys, and settings from Rust backend.
   useEffect(() => {
     void invoke<AppSettings>("get_settings").then(setSettings);
     void invoke<HostProfile[]>("list_profiles")
       .then(setProfiles)
       .catch((err: unknown) => pushToast("Failed to load hosts", "error", String(err)));
-  }, [pushToast]);
+    void invoke<Snippet[]>("list_snippets")
+      .then(setSnippets)
+      .catch((err: unknown) => pushToast("Failed to load snippets", "error", String(err)));
+    refreshSshKeys();
+  }, [pushToast, refreshSshKeys]);
 
   // Clear SFTP selection when switching tabs or directories.
   useEffect(() => {
     setSelectedSftpPath(null);
   }, [activeSessionId, activeSession?.sftpPath]);
 
-  // Clean up any active sidebar drag listeners on unmount.
+  // Turn off split/broadcast if session count drops below 2.
+  useEffect(() => {
+    if (sessions.length < 2) {
+      setSplitSessionId(null);
+      setBroadcastEnabled(false);
+    } else if (splitSessionId && !sessions.some((s) => s.id === splitSessionId)) {
+      setSplitSessionId(null);
+    }
+  }, [sessions, splitSessionId]);
+
   useEffect(() => {
     return () => {
       resizeCleanupRef.current?.();
     };
   }, []);
 
-  // Global keyboard shortcuts (Ctrl+B toggles sidebar).
+  // Global keyboard shortcuts (Ctrl+B sidebar, Ctrl+K / Ctrl+Shift+P command palette).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.ctrlKey && !e.shiftKey && e.key.toLowerCase() === "b") {
         e.preventDefault();
         setSidebarOpen((v) => !v);
+      } else if (
+        (e.ctrlKey && !e.shiftKey && e.key.toLowerCase() === "k") ||
+        (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === "p")
+      ) {
+        e.preventDefault();
+        setPaletteOpen((v) => !v);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  // Subscribe to Rust push events with StrictMode-safe cancellation (zero leaks, zero polling).
+  // Subscribe to Rust push events with StrictMode-safe cancellation.
   useEffect(() => {
     let cancelled = false;
     const unsubs: (() => void)[] = [];
@@ -216,6 +285,17 @@ export function App() {
       );
     });
 
+    sub<{ session_id: string; tunnels: TunnelInfo[] }>(
+      "vela://tunnels",
+      ({ session_id, tunnels }) => {
+        setSessions((prev) => prev.map((s) => (s.id === session_id ? { ...s, tunnels } : s)));
+      },
+    );
+
+    sub<{ session_id: string; preview: FilePreview }>("vela://preview", ({ preview: p }) => {
+      setPreview(p);
+    });
+
     sub<HostKeyPrompt>("vela://host-key", (prompt) => {
       setHostKeyPrompts((prev) => [...prev, prompt]);
     });
@@ -231,7 +311,6 @@ export function App() {
       },
     );
 
-    // Native OS drag-and-drop onto window -> upload files or folders into active SFTP directory.
     sub<{ paths: string[] }>("tauri://drag-drop", ({ paths }) => {
       const sid = activeSessionIdRef.current;
       const active = sessionsRef.current.find((s) => s.id === sid);
@@ -253,45 +332,49 @@ export function App() {
     };
   }, [pushToast]);
 
-  const connectProfile = async (profileId: string) => {
-    const profile = profiles.find((p) => p.id === profileId);
-    const sessionId = crypto.randomUUID();
-    const tab: SessionTab = {
-      id: sessionId,
-      title: profile?.name ?? "Connecting...",
-      address: profile
-        ? `${profile.username}@${profile.host}${profile.port !== 22 ? `:${profile.port}` : ""}`
-        : "",
-      state: "connecting",
-      sftpPath: "/",
-      sftpEntries: [],
-      stats: null,
-      cpuHistory: [],
-    };
+  const connectProfile = useCallback(
+    async (profileId: string) => {
+      const profile = profiles.find((p) => p.id === profileId);
+      const sessionId = crypto.randomUUID();
+      const tab: SessionTab = {
+        id: sessionId,
+        profileId,
+        title: profile?.name ?? "Connecting...",
+        address: profile
+          ? `${profile.username}@${profile.host}${profile.port !== 22 ? `:${profile.port}` : ""}`
+          : "",
+        state: "connecting",
+        sftpPath: "/",
+        sftpEntries: [],
+        stats: null,
+        cpuHistory: [],
+        tunnels: [],
+      };
 
-    // Register tab BEFORE invoking connect_profile so early MOTD/state/SFTP events are never lost.
-    setSessions((prev) => [...prev, tab]);
-    setActiveSessionId(sessionId);
-    setSidebarTab("sftp");
-    setSidebarOpen(true);
+      setSessions((prev) => [...prev, tab]);
+      setActiveSessionId(sessionId);
+      setSidebarTab("sftp");
+      setSidebarOpen(true);
 
-    try {
-      const res = await invoke<{ session_id: string; title: string; address: string }>(
-        "connect_profile",
-        { sessionId, profileId, cols: 120, rows: 36 },
-      );
-      setSessions((prev) =>
-        prev.map((s) =>
-          s.id === sessionId ? { ...s, title: res.title, address: res.address } : s,
-        ),
-      );
-    } catch (err) {
-      ptyBuffersRef.current.delete(sessionId);
-      setSessions((prev) => prev.filter((s) => s.id !== sessionId));
-      setActiveSessionId((curr) => (curr === sessionId ? null : curr));
-      pushToast("Connection failed", "error", String(err));
-    }
-  };
+      try {
+        const res = await invoke<{ session_id: string; title: string; address: string }>(
+          "connect_profile",
+          { sessionId, profileId, cols: 120, rows: 36 },
+        );
+        setSessions((prev) =>
+          prev.map((s) =>
+            s.id === sessionId ? { ...s, title: res.title, address: res.address } : s,
+          ),
+        );
+      } catch (err) {
+        ptyBuffersRef.current.delete(sessionId);
+        setSessions((prev) => prev.filter((s) => s.id !== sessionId));
+        setActiveSessionId((curr) => (curr === sessionId ? null : curr));
+        pushToast("Connection failed", "error", String(err));
+      }
+    },
+    [profiles, pushToast],
+  );
 
   const handleSaveAndConnect = async () => {
     if (!form.host.trim() || !form.username.trim()) {
@@ -329,6 +412,20 @@ export function App() {
     }
   };
 
+  const handleImportSshConfig = async () => {
+    try {
+      const imported = await invoke<HostProfile[]>("import_ssh_config");
+      if (imported.length === 0) {
+        pushToast("No new hosts found in ~/.ssh/config", "info");
+      } else {
+        setProfiles((prev) => [...prev, ...imported]);
+        pushToast(`Imported ${imported.length} host(s) from ~/.ssh/config`, "info");
+      }
+    } catch (err) {
+      pushToast("Import failed", "error", String(err));
+    }
+  };
+
   const handleDeleteProfile = async (profileId: string) => {
     try {
       await invoke("delete_profile", { profileId });
@@ -347,10 +444,40 @@ export function App() {
 
     const remaining = sessionsRef.current.filter((s) => s.id !== id);
     setSessions(remaining);
+    if (splitSessionId === id) setSplitSessionId(null);
     if (activeSessionIdRef.current === id) {
       setActiveSessionId(remaining.length > 0 ? remaining[remaining.length - 1].id : null);
     }
   };
+
+  const handleToggleSplit = useCallback(() => {
+    if (splitSessionId) {
+      setSplitSessionId(null);
+      return;
+    }
+    const other = sessions.find((s) => s.id !== activeSessionId);
+    if (other) {
+      setSplitSessionId(other.id);
+    }
+  }, [splitSessionId, sessions, activeSessionId]);
+
+  const handleRunSnippet = useCallback(
+    (snippet: Snippet, broadcast: boolean) => {
+      const payload = snippet.auto_execute ? `${snippet.command}\r` : snippet.command;
+      const targets = broadcast
+        ? sessionsRef.current.map((s) => s.id)
+        : activeSessionIdRef.current
+          ? [activeSessionIdRef.current]
+          : [];
+      for (const sid of targets) {
+        void invoke("send_pty_input", { sessionId: sid, data: payload });
+      }
+      if (activeSessionIdRef.current) {
+        termRefs.current.get(activeSessionIdRef.current)?.focus();
+      }
+    },
+    [],
+  );
 
   const handleQuickConnectSubmit = () => {
     const q = quickConnect.trim();
@@ -401,6 +528,141 @@ export function App() {
     pushToast("No matching host", "info", "Use user@host[:port] to pre-fill a new connection.");
   };
 
+  // Command Palette items
+  const paletteItems = useMemo<PaletteItem[]>(() => {
+    const items: PaletteItem[] = [];
+
+    for (const p of profiles) {
+      items.push({
+        id: `host:${p.id}`,
+        group: "Connect to Host",
+        label: p.name,
+        subtitle: `${p.username}@${p.host}${p.port !== 22 ? `:${p.port}` : ""}`,
+        icon: <Server className="h-3.5 w-3.5" />,
+        onSelect: () => void connectProfile(p.id),
+      });
+    }
+
+    if (activeSession) {
+      for (const s of snippets) {
+        items.push({
+          id: `snippet:${s.id}`,
+          group: "Run Snippet",
+          label: s.name,
+          subtitle: s.command,
+          icon: <Code2 className="h-3.5 w-3.5" />,
+          onSelect: () => handleRunSnippet(s, false),
+        });
+      }
+    }
+
+    items.push(
+      {
+        id: "act:sidebar",
+        group: "Workspace",
+        label: sidebarOpen ? "Hide Sidebar" : "Show Sidebar",
+        shortcut: "Ctrl+B",
+        icon: <Folder className="h-3.5 w-3.5" />,
+        onSelect: () => setSidebarOpen((v) => !v),
+      },
+      {
+        id: "act:tunnels",
+        group: "Workspace",
+        label: "Open Port Forwarding / Tunnels",
+        icon: <Cable className="h-3.5 w-3.5" />,
+        onSelect: () => {
+          setSidebarTab("tunnels");
+          setSidebarOpen(true);
+        },
+      },
+      {
+        id: "act:keys",
+        group: "Workspace",
+        label: "Open SSH Key Manager",
+        icon: <KeyRound className="h-3.5 w-3.5" />,
+        onSelect: () => {
+          setSidebarTab("keys");
+          setSidebarOpen(true);
+        },
+      },
+      {
+        id: "act:snippets",
+        group: "Workspace",
+        label: "Open Saved Snippets",
+        icon: <Code2 className="h-3.5 w-3.5" />,
+        onSelect: () => {
+          setSidebarTab("snippets");
+          setSidebarOpen(true);
+        },
+      },
+      {
+        id: "act:settings",
+        group: "Workspace",
+        label: "Open Settings",
+        icon: <Settings className="h-3.5 w-3.5" />,
+        onSelect: () => {
+          setSidebarTab("settings");
+          setSidebarOpen(true);
+        },
+      },
+    );
+
+    if (sessions.length > 1) {
+      items.push(
+        {
+          id: "act:split",
+          group: "Workspace",
+          label: splitSessionId ? "Close Split View" : "Split View Side-by-Side",
+          icon: <Columns2 className="h-3.5 w-3.5" />,
+          onSelect: handleToggleSplit,
+        },
+        {
+          id: "act:broadcast",
+          group: "Workspace",
+          label: broadcastEnabled ? "Disable Broadcast Input" : "Enable Broadcast Input (All Tabs)",
+          icon: <Radio className="h-3.5 w-3.5" />,
+          onSelect: () => setBroadcastEnabled((v) => !v),
+        },
+      );
+    }
+
+    if (activeSession) {
+      items.push({
+        id: "act:find",
+        group: "Terminal",
+        label: "Find in Terminal",
+        shortcut: "Ctrl+Shift+F",
+        icon: <Terminal className="h-3.5 w-3.5" />,
+        onSelect: () => termRefs.current.get(activeSession.id)?.openFind(),
+      });
+    }
+
+    for (const id of Object.keys(THEMES) as ThemeId[]) {
+      items.push({
+        id: `theme:${id}`,
+        group: "Themes",
+        label: `Switch Theme: ${THEMES[id].label}`,
+        icon: <Palette className="h-3.5 w-3.5" />,
+        onSelect: () => persistSettings({ ...settings, theme_id: id }),
+      });
+    }
+
+    return items;
+  }, [
+    profiles,
+    snippets,
+    activeSession,
+    sidebarOpen,
+    sessions.length,
+    splitSessionId,
+    broadcastEnabled,
+    settings,
+    connectProfile,
+    handleRunSnippet,
+    handleToggleSplit,
+    persistSettings,
+  ]);
+
   // SFTP actions
   const selectedEntry =
     activeSession?.sftpEntries.find((e) => e.path === selectedSftpPath) ?? null;
@@ -409,6 +671,13 @@ export function App() {
     if (!activeSession) return;
     void invoke("sftp_open_entry", { sessionId: activeSession.id, path: entry.path }).catch(
       (err: unknown) => pushToast("Failed to open entry", "error", String(err)),
+    );
+  };
+
+  const sftpPreviewEntry = (entry: RemoteEntry) => {
+    if (!activeSession) return;
+    void invoke("sftp_read_preview", { sessionId: activeSession.id, path: entry.path }).catch(
+      (err: unknown) => pushToast("Preview failed", "error", String(err)),
     );
   };
 
@@ -435,8 +704,7 @@ export function App() {
 
   const sftpCopyPathToTerminal = (entry: RemoteEntry) => {
     if (!activeSession) return;
-    const quoted = shellQuote(entry.path);
-    termRefs.current.get(activeSession.id)?.pasteText(quoted);
+    termRefs.current.get(activeSession.id)?.pasteText(shellQuote(entry.path));
   };
 
   const sftpCdInTerminal = (entry: RemoteEntry) => {
@@ -502,6 +770,15 @@ export function App() {
           ? "border-t"
           : "border-r";
 
+  const sidebarTitles: Record<SidebarTab, string> = {
+    hosts: "Sessions",
+    sftp: "SSH browser (SFTP)",
+    snippets: "Saved Snippets",
+    tunnels: "Port Forwarding",
+    keys: "SSH Key Manager",
+    settings: "Settings",
+  };
+
   const sidebarEl = (
     <div
       className={`flex shrink-0 flex-col gap-2 ${sidebarBorderClass} p-2.5`}
@@ -534,11 +811,7 @@ export function App() {
       )}
 
       <div className="px-0.5 text-[11px] font-medium" style={{ color: theme.textMuted }}>
-        {sidebarTab === "hosts"
-          ? "Sessions"
-          : sidebarTab === "sftp"
-            ? "SSH browser (SFTP)"
-            : "Settings"}
+        {sidebarTitles[sidebarTab]}
       </div>
 
       <div className="min-h-0 flex-1">
@@ -551,11 +824,13 @@ export function App() {
             onSaveAndConnect={() => void handleSaveAndConnect()}
             onConnectProfile={(id) => void connectProfile(id)}
             onDeleteProfile={(id) => void handleDeleteProfile(id)}
+            onImportSshConfig={() => void handleImportSshConfig()}
           />
         )}
         {sidebarTab === "sftp" && (
           <SftpSidebar
             session={activeSession}
+            bookmarks={activeProfile?.bookmarks ?? []}
             settings={settings}
             theme={theme}
             selectedPath={selectedSftpPath}
@@ -596,6 +871,17 @@ export function App() {
             onToggleHidden={() =>
               persistSettings({ ...settings, show_hidden_files: !settings.show_hidden_files })
             }
+            onToggleBookmark={(path) => {
+              if (!activeSession?.profileId) return;
+              const pid = activeSession.profileId;
+              void invoke<string[]>("toggle_bookmark", { profileId: pid, path })
+                .then((updated) => {
+                  setProfiles((prev) =>
+                    prev.map((p) => (p.id === pid ? { ...p, bookmarks: updated } : p)),
+                  );
+                })
+                .catch((err: unknown) => pushToast("Bookmark failed", "error", String(err)));
+            }}
             onToggleFollowCd={(v) => persistSettings({ ...settings, follow_terminal_folder: v })}
             onToggleMonitoring={(v) => persistSettings({ ...settings, remote_monitoring: v })}
             onMiddleClickEntry={sftpCopyPathToTerminal}
@@ -603,6 +889,89 @@ export function App() {
               setContextMenu({ kind: "sftp_item", entry, x, y })
             }
             onBgContextMenu={(x, y) => setContextMenu({ kind: "sftp_bg", x, y })}
+          />
+        )}
+        {sidebarTab === "snippets" && (
+          <SnippetsPanel
+            snippets={snippets}
+            hasActiveSession={Boolean(activeSession)}
+            sessionCount={sessions.length}
+            theme={theme}
+            onRunSnippet={handleRunSnippet}
+            onCreateSnippet={(name, command, autoExecute) => {
+              void invoke<Snippet>("save_snippet", {
+                name,
+                command,
+                folder: null,
+                autoExecute,
+              })
+                .then((created) => {
+                  setSnippets((prev) => [...prev, created]);
+                  pushToast(`Saved snippet "${created.name}"`, "info");
+                })
+                .catch((err: unknown) => pushToast("Failed to save snippet", "error", String(err)));
+            }}
+            onDeleteSnippet={(snippetId) => {
+              void invoke("delete_snippet", { snippetId })
+                .then(() => setSnippets((prev) => prev.filter((s) => s.id !== snippetId)))
+                .catch((err: unknown) =>
+                  pushToast("Failed to delete snippet", "error", String(err)),
+                );
+            }}
+          />
+        )}
+        {sidebarTab === "tunnels" && (
+          <TunnelsPanel
+            session={activeSession}
+            theme={theme}
+            onStartTunnel={(localPort, remoteHost, remotePort) => {
+              if (!activeSession) return;
+              void invoke("start_local_tunnel", {
+                sessionId: activeSession.id,
+                localPort,
+                remoteHost,
+                remotePort,
+              }).catch((err: unknown) => pushToast("Tunnel failed", "error", String(err)));
+            }}
+            onStopTunnel={(tunnelId) => {
+              if (!activeSession) return;
+              void invoke("stop_local_tunnel", {
+                sessionId: activeSession.id,
+                tunnelId,
+              }).catch((err: unknown) => pushToast("Stop tunnel failed", "error", String(err)));
+            }}
+            onCopyAddress={(addr) => {
+              void navigator.clipboard.writeText(addr);
+              pushToast(`Copied ${addr}`, "info");
+            }}
+          />
+        )}
+        {sidebarTab === "keys" && (
+          <KeysPanel
+            keys={sshKeys}
+            hasActiveSession={Boolean(activeSession)}
+            activeHostLabel={activeSession?.title}
+            theme={theme}
+            onRefresh={refreshSshKeys}
+            onGenerateKey={(name, comment) => {
+              void invoke<SshKeyInfo>("generate_ssh_key", { name, comment })
+                .then((created) => {
+                  setSshKeys((prev) => [...prev, created]);
+                  pushToast(`Generated Ed25519 key ${created.name}`, "info");
+                })
+                .catch((err: unknown) => pushToast("Key generation failed", "error", String(err)));
+            }}
+            onCopyPublicKey={(pubKey) => {
+              void navigator.clipboard.writeText(pubKey);
+              pushToast("Copied public key", "info");
+            }}
+            onDeployKey={(publicKey) => {
+              if (!activeSession) return;
+              void invoke("deploy_public_key", {
+                sessionId: activeSession.id,
+                publicKey,
+              }).catch((err: unknown) => pushToast("Key deploy failed", "error", String(err)));
+            }}
           />
         )}
         {sidebarTab === "settings" && (
@@ -625,41 +994,82 @@ export function App() {
 
   const terminalArea = (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-      <div className="relative min-h-0 flex-1" style={{ backgroundColor: theme.termBg }}>
+      <div
+        className={`relative flex min-h-0 flex-1 ${splitSessionId ? "divide-x" : ""}`}
+        style={{ backgroundColor: theme.termBg, borderColor: theme.border }}
+      >
         {sessions.length === 0 ? (
-          <div className="flex h-full flex-col items-center justify-center gap-2 text-center">
-            <div className="text-2xl font-semibold tracking-tight" style={{ color: theme.textPrimary }}>
+          <div className="flex h-full w-full flex-col items-center justify-center gap-3 text-center">
+            <div
+              className="text-2xl font-semibold tracking-tight"
+              style={{ color: theme.textPrimary }}
+            >
               Vela
             </div>
-            <div className="text-xs" style={{ color: theme.textMuted }}>
-              Select a saved host or add your homeserver on the left to connect.
+            <div className="max-w-xs text-xs leading-relaxed" style={{ color: theme.textMuted }}>
+              Connect to a saved host on the left, import your{" "}
+              <code className="rounded px-1 py-0.5" style={{ backgroundColor: theme.bgElevated }}>
+                ~/.ssh/config
+              </code>
+              , or press{" "}
+              <kbd className="rounded px-1.5 py-0.5" style={{ backgroundColor: theme.bgElevated }}>
+                Ctrl+K
+              </kbd>{" "}
+              to jump anywhere.
             </div>
           </div>
         ) : (
-          sessions.map((s) => (
-            <TerminalPane
-              key={s.id}
-              ref={(handle) => {
-                if (handle) termRefs.current.set(s.id, handle);
-                else termRefs.current.delete(s.id);
-              }}
-              sessionId={s.id}
-              active={s.id === activeSessionId}
-              settings={settings}
-              theme={theme}
-              registerPtyWriter={registerPtyWriter}
-              drainBufferedPty={drainBufferedPty}
-              onOsc7Path={(path) => {
-                const live = sessionsRef.current.find((x) => x.id === s.id);
-                if (settingsRef.current.follow_terminal_folder && live && path !== live.sftpPath) {
-                  void invoke("sftp_list_dir", { sessionId: s.id, path });
-                }
-              }}
-              onContextMenu={(x, y) => setContextMenu({ kind: "terminal", x, y })}
-              onAutoCopied={() => pushToast("Copied selection", "info")}
-              onSaveTranscript={saveActiveTranscript}
-            />
-          ))
+          sessions.map((s) => {
+            const isVisible = s.id === activeSessionId || s.id === splitSessionId;
+            return (
+              <div
+                key={s.id}
+                onMouseDown={() => {
+                  if (s.id !== activeSessionId) setActiveSessionId(s.id);
+                }}
+                className={isVisible ? "relative min-h-0 min-w-0 flex-1" : "hidden"}
+                style={{ borderColor: theme.border }}
+              >
+                <TerminalPane
+                  ref={(handle) => {
+                    if (handle) termRefs.current.set(s.id, handle);
+                    else termRefs.current.delete(s.id);
+                  }}
+                  sessionId={s.id}
+                  active={isVisible}
+                  settings={settings}
+                  theme={theme}
+                  registerPtyWriter={registerPtyWriter}
+                  drainBufferedPty={drainBufferedPty}
+                  onOsc7Path={(path) => {
+                    const live = sessionsRef.current.find((x) => x.id === s.id);
+                    if (
+                      settingsRef.current.follow_terminal_folder &&
+                      live &&
+                      path !== live.sftpPath
+                    ) {
+                      void invoke("sftp_list_dir", { sessionId: s.id, path });
+                    }
+                  }}
+                  onContextMenu={(x, y) => {
+                    setActiveSessionId(s.id);
+                    setContextMenu({ kind: "terminal", x, y });
+                  }}
+                  onAutoCopied={() => pushToast("Copied selection", "info")}
+                  onSaveTranscript={saveActiveTranscript}
+                  onSendData={(data) => {
+                    if (broadcastRef.current) {
+                      for (const sess of sessionsRef.current) {
+                        void invoke("send_pty_input", { sessionId: sess.id, data });
+                      }
+                    } else {
+                      void invoke("send_pty_input", { sessionId: s.id, data });
+                    }
+                  }}
+                />
+              </div>
+            );
+          })
         )}
       </div>
 
@@ -673,7 +1083,12 @@ export function App() {
     </div>
   );
 
-  const railBtn = (tab: SidebarTab, Icon: typeof Server, title: string) => {
+  const railBtn = (
+    tab: SidebarTab,
+    Icon: typeof Server,
+    title: string,
+    badge?: number,
+  ) => {
     const active = sidebarOpen && sidebarTab === tab;
     return (
       <button
@@ -685,13 +1100,21 @@ export function App() {
           }
         }}
         title={title}
-        className="flex h-8 w-8 items-center justify-center rounded-lg transition-colors hover:bg-white/8"
+        className="relative flex h-8 w-8 items-center justify-center rounded-lg transition-colors hover:bg-white/8"
         style={{
           backgroundColor: active ? theme.bgElevated : "transparent",
           color: active ? theme.textPrimary : theme.textMuted,
         }}
       >
         <Icon className="h-4 w-4" />
+        {badge !== undefined && badge > 0 && (
+          <span
+            className="absolute -right-0.5 -top-0.5 flex h-3.5 min-w-[14px] items-center justify-center rounded-full px-1 text-[9px] font-semibold tabular-nums"
+            style={{ backgroundColor: theme.success, color: theme.bgBase }}
+          >
+            {badge}
+          </span>
+        )}
       </button>
     );
   };
@@ -704,6 +1127,8 @@ export function App() {
       <Titlebar
         sessions={sessions}
         activeSessionId={activeSessionId}
+        splitSessionId={splitSessionId}
+        broadcastEnabled={broadcastEnabled}
         theme={theme}
         onToggleSidebar={() => setSidebarOpen((v) => !v)}
         onSelectTab={setActiveSessionId}
@@ -712,6 +1137,9 @@ export function App() {
           setSidebarTab("hosts");
           setSidebarOpen(true);
         }}
+        onOpenPalette={() => setPaletteOpen(true)}
+        onToggleSplit={handleToggleSplit}
+        onToggleBroadcast={() => setBroadcastEnabled((v) => !v)}
       />
 
       <div className="flex min-h-0 flex-1">
@@ -721,6 +1149,9 @@ export function App() {
         >
           {railBtn("hosts", Server, "Sessions")}
           {railBtn("sftp", Folder, "SFTP Browser")}
+          {railBtn("snippets", Code2, "Saved Snippets")}
+          {railBtn("tunnels", Cable, "Port Forwarding / Tunnels", totalTunnels)}
+          {railBtn("keys", KeyRound, "SSH Key Manager")}
           <div className="flex-1" />
           {railBtn("settings", Settings, "Settings")}
         </div>
@@ -753,16 +1184,23 @@ export function App() {
       </div>
 
       <div
-        className="flex h-6 shrink-0 items-center border-t px-3 text-[11px]"
+        className="flex h-6 shrink-0 items-center justify-between border-t px-3 text-[11px]"
         style={{
           backgroundColor: theme.bgBase,
           borderColor: theme.border,
           color: theme.textMuted,
         }}
       >
-        {activeSession
-          ? `${activeSession.state === "connected" ? "Connected" : activeSession.state === "connecting" ? "Connecting..." : "Disconnected"}  ·  ${activeSession.address}  ·  ${activeSession.sftpPath}`
-          : "Ready  ·  Ctrl+B: Sidebar  ·  Drag files onto window to upload"}
+        <span className="truncate">
+          {activeSession
+            ? `${activeSession.state === "connected" ? "Connected" : activeSession.state === "connecting" ? "Connecting..." : "Disconnected"}  ·  ${activeSession.address}  ·  ${activeSession.sftpPath}`
+            : "Ready  ·  Ctrl+K: Command Palette  ·  Ctrl+B: Sidebar"}
+        </span>
+        {broadcastEnabled && (
+          <span className="shrink-0 font-medium" style={{ color: theme.warning }}>
+            Broadcasting to {sessions.length} terminals
+          </span>
+        )}
       </div>
 
       <Toasts
@@ -771,12 +1209,36 @@ export function App() {
         onDismiss={(id) => setToasts((prev) => prev.filter((t) => t.id !== id))}
       />
 
+      <CommandPalette
+        open={paletteOpen}
+        theme={theme}
+        items={paletteItems}
+        onClose={() => setPaletteOpen(false)}
+      />
+
+      <FilePreviewModal
+        preview={preview}
+        theme={theme}
+        onClose={() => setPreview(null)}
+        onEditLocally={(path) => {
+          setPreview(null);
+          if (activeSession) {
+            void invoke("sftp_edit_locally", { sessionId: activeSession.id, remotePath: path });
+          }
+        }}
+        onCopyContent={(content) => {
+          void navigator.clipboard.writeText(content);
+          pushToast("Copied file contents", "info");
+        }}
+      />
+
       <ContextMenu
         menu={contextMenu}
         sftpPosition={settings.sftp_position}
         theme={theme}
         onClose={() => setContextMenu(null)}
         onOpenEntry={sftpOpenEntry}
+        onPreviewEntry={sftpPreviewEntry}
         onDownloadEntry={sftpDownloadEntry}
         onUploadHere={sftpUploadPicker}
         onRenameEntry={(entry) => setActiveModal({ kind: "rename", entry })}

@@ -15,12 +15,15 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{debug, error, info, warn};
 use vela_core::{HostKeyStatus, KnownHostsStore, VelaError, VelaResult};
 
+use crate::keys::deploy_public_key_remote;
 use crate::sftp::{
-    RemoteEntry, chmod_remote, create_empty_file, create_remote_dir, delete_remote, download_file,
-    is_dangerous_executable_ext, is_remote_dir, list_remote_dir, parent_remote_path, rename_remote,
-    resolve_canonical_path, sanitize_local_filename, upload_path_recursive,
+    DEFAULT_PREVIEW_MAX_BYTES, FilePreview, RemoteEntry, chmod_remote, create_empty_file,
+    create_remote_dir, delete_remote, download_file, is_dangerous_executable_ext, is_remote_dir,
+    list_remote_dir, parent_remote_path, read_file_preview, rename_remote, resolve_canonical_path,
+    sanitize_local_filename, upload_path_recursive,
 };
 use crate::telemetry::{ServerStats, TelemetryState, poll_server_stats};
+use crate::tunnels::{LocalTunnelSpec, TunnelInfo, TunnelManager};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PtySize {
@@ -123,6 +126,19 @@ pub enum SessionCommand {
     SftpEditLocally {
         remote_path: String,
     },
+    SftpReadPreview {
+        path: String,
+    },
+    DeployPublicKey(String),
+    StartLocalTunnel {
+        id: String,
+        local_port: u16,
+        remote_host: String,
+        remote_port: u16,
+    },
+    StopLocalTunnel {
+        id: String,
+    },
     SetMonitoring(bool),
     Disconnect,
 }
@@ -138,6 +154,8 @@ pub enum SessionEvent {
         path: String,
         entries: Vec<RemoteEntry>,
     },
+    FilePreview(FilePreview),
+    TunnelsUpdated(Vec<TunnelInfo>),
     Stats(ServerStats),
     Notice(String),
     Error(VelaError),
@@ -461,9 +479,10 @@ async fn run_session(
         })
         .await;
 
-    // Cancellation signal shared by telemetry, SFTP worker, and edit watchers.
+    // Cancellation signal shared by telemetry, SFTP worker, tunnels, and edit watchers.
     let (cancel_tx, cancel_rx) = watch::channel(false);
     let (mon_tx, mut mon_rx) = watch::channel(true);
+    let tunnel_manager = TunnelManager::new();
 
     // Dedicated telemetry polling task (never blocks PTY or SFTP).
     {
@@ -575,6 +594,56 @@ async fn run_session(
                     }
                     SessionCommand::SetMonitoring(enabled) => {
                         let _ = mon_tx.send(enabled);
+                    }
+                    SessionCommand::DeployPublicKey(public_key) => {
+                        let handle_clone = Arc::clone(&handle);
+                        let event_tx_clone = event_tx.clone();
+                        tokio::spawn(async move {
+                            match deploy_public_key_remote(&handle_clone, &public_key).await {
+                                Ok(()) => {
+                                    let _ = event_tx_clone
+                                        .send(SessionEvent::Notice(
+                                            "Deployed SSH key to server".into(),
+                                        ))
+                                        .await;
+                                }
+                                Err(err) => {
+                                    let _ = event_tx_clone.send(SessionEvent::Error(err)).await;
+                                }
+                            }
+                        });
+                    }
+                    SessionCommand::StartLocalTunnel {
+                        id,
+                        local_port,
+                        remote_host,
+                        remote_port,
+                    } => {
+                        let tm = tunnel_manager.clone();
+                        let handle_clone = Arc::clone(&handle);
+                        let event_tx_clone = event_tx.clone();
+                        let cancel_clone = cancel_rx.clone();
+                        tokio::spawn(async move {
+                            tm.start_local_tunnel(
+                                handle_clone,
+                                event_tx_clone,
+                                cancel_clone,
+                                LocalTunnelSpec {
+                                    id,
+                                    local_port,
+                                    remote_host,
+                                    remote_port,
+                                },
+                            )
+                            .await;
+                        });
+                    }
+                    SessionCommand::StopLocalTunnel { id } => {
+                        let tm = tunnel_manager.clone();
+                        let event_tx_clone = event_tx.clone();
+                        tokio::spawn(async move {
+                            tm.stop_local_tunnel(&id, &event_tx_clone).await;
+                        });
                     }
                     SessionCommand::Disconnect => {
                         let _ = cancel_tx.send(true);
@@ -758,6 +827,16 @@ async fn handle_sftp_command(
                 cancel_rx,
             )
             .await;
+        }
+        SessionCommand::SftpReadPreview { path } => {
+            match read_file_preview(sftp, &path, DEFAULT_PREVIEW_MAX_BYTES).await {
+                Ok(preview) => {
+                    let _ = event_tx.send(SessionEvent::FilePreview(preview)).await;
+                }
+                Err(err) => {
+                    let _ = event_tx.send(SessionEvent::Error(err)).await;
+                }
+            }
         }
         _ => {}
     }

@@ -1,7 +1,7 @@
 export type ThemeId = "obsidian" | "catppuccin_mocha" | "tokyo_night" | "nord";
 export type CursorStyle = "beam" | "block" | "underline";
 export type SftpDockPosition = "left" | "right" | "bottom" | "top";
-export type SidebarTab = "hosts" | "sftp" | "settings";
+export type SidebarTab = "hosts" | "sftp" | "snippets" | "tunnels" | "keys" | "settings";
 
 export interface AppSettings {
   theme_id: ThemeId;
@@ -61,8 +61,42 @@ export interface ServerStats {
   disks: DiskUsage[];
 }
 
+export interface Snippet {
+  id: string;
+  name: string;
+  command: string;
+  folder?: string | null;
+  auto_execute: boolean;
+}
+
+export interface SshKeyInfo {
+  name: string;
+  private_path: string;
+  public_path: string;
+  public_key: string;
+  fingerprint: string;
+  key_type: string;
+}
+
+export interface TunnelInfo {
+  id: string;
+  local_port: number;
+  remote_host: string;
+  remote_port: number;
+  active_connections: number;
+}
+
+export interface FilePreview {
+  path: string;
+  name: string;
+  content: string;
+  truncated: boolean;
+  size: number;
+}
+
 export interface SessionTab {
   id: string;
+  profileId?: string;
   title: string;
   address: string;
   state: "connecting" | "connected" | "disconnected";
@@ -70,6 +104,7 @@ export interface SessionTab {
   sftpEntries: RemoteEntry[];
   stats: ServerStats | null;
   cpuHistory: number[];
+  tunnels: TunnelInfo[];
 }
 
 export interface HostKeyPrompt {

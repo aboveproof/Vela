@@ -29,6 +29,7 @@ interface TerminalPaneProps {
   onContextMenu: (x: number, y: number) => void;
   onAutoCopied: () => void;
   onSaveTranscript: () => void;
+  onSendData?: (data: string) => void;
 }
 
 function mapCursorStyle(s: AppSettings["cursor_style"]): "bar" | "block" | "underline" {
@@ -58,6 +59,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
       onContextMenu,
       onAutoCopied,
       onSaveTranscript,
+      onSendData,
     },
     ref,
   ) {
@@ -77,6 +79,8 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
     onAutoCopiedRef.current = onAutoCopied;
     const onSaveRef = useRef(onSaveTranscript);
     onSaveRef.current = onSaveTranscript;
+    const onSendDataRef = useRef(onSendData);
+    onSendDataRef.current = onSendData;
 
     const [findOpen, setFindOpen] = useState(false);
     const [findQuery, setFindQuery] = useState("");
@@ -202,9 +206,13 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
 
       fitAndSyncResize();
 
-      // Forward user keystrokes to Rust russh PTY.
+      // Forward user keystrokes to Rust russh PTY (or broadcast handler when active).
       const dataDisp = term.onData((data) => {
-        void invoke("send_pty_input", { sessionId, data });
+        if (onSendDataRef.current) {
+          onSendDataRef.current(data);
+        } else {
+          void invoke("send_pty_input", { sessionId, data });
+        }
       });
 
       // Validated + debounced OSC 7 directory tracking -> sync SFTP sidebar.

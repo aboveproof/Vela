@@ -47,8 +47,19 @@ fn main() {
             commands::sftp_delete,
             commands::sftp_chmod,
             commands::sftp_edit_locally,
+            commands::sftp_read_preview,
             commands::save_transcript_dialog,
             commands::open_external_url,
+            commands::list_snippets,
+            commands::save_snippet,
+            commands::delete_snippet,
+            commands::import_ssh_config,
+            commands::toggle_bookmark,
+            commands::list_ssh_keys,
+            commands::generate_ssh_key,
+            commands::deploy_public_key,
+            commands::start_local_tunnel,
+            commands::stop_local_tunnel,
         ])
         .run(tauri::generate_context!());
 
